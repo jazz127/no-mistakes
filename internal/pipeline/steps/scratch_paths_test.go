@@ -230,8 +230,8 @@ func TestStagePipelineChanges_AgentStagedScratchIsUnstaged(t *testing.T) {
 	if !slices.Equal(staged, []string{"fix.txt"}) {
 		t.Fatalf("staged = %v, want only fix.txt", staged)
 	}
-	status := gitStatusPorcelain(t, dir)
-	for _, left := range []string{"?? .codex-live-check/", "?? tests/_all.sh"} {
+	status := gitCmd(t, dir, "status", "--porcelain", "--untracked-files=all")
+	for _, left := range append([]string{"?? tests/_all.sh"}, prefixed("?? ", corepackBundle)...) {
 		if !strings.Contains(status, left) {
 			t.Errorf("unstaged scratch %q should stay untracked in the worktree, status %q", left, status)
 		}
@@ -239,4 +239,12 @@ func TestStagePipelineChanges_AgentStagedScratchIsUnstaged(t *testing.T) {
 	if log := logs(); !strings.Contains(log, "tests/_all.sh (scratch script)") || !strings.Contains(log, ".codex-live-check/cache/node/corepack/ (tool cache, 4 files)") {
 		t.Fatalf("step log does not name the unstaged scratch:\n%s", log)
 	}
+}
+
+func prefixed(prefix string, items []string) []string {
+	out := make([]string, len(items))
+	for i, item := range items {
+		out[i] = prefix + item
+	}
+	return out
 }
