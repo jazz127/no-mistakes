@@ -230,7 +230,7 @@ Pushes the validated branch to the configured push target.
 **Behavior:**
 
 - If `commands.format` is set, ensures [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) has succeeded once for the isolated worktree, then runs the formatter
-- Commits any uncommitted changes left by pipeline agents or the formatter with message `no-mistakes: apply agent fixes`
+- Commits any uncommitted changes left by pipeline agents or the formatter with message `no-mistakes: apply agent fixes`, leaving out [new (untracked or newly staged) tool caches and scratch scripts](/no-mistakes/concepts/auto-fix/#fix-commits) as every automatic commit does
 - Applies the [recorded-fix-decision revalidation boundary](#finding-decision-history) before publication, which can restart the existing pipeline at Review
 - Without fork routing, successful run-start validation selects the upstream URL from the working clone; when it matches the gate worktree's `origin`, the worktree URL is used so embedded credentials retained outside the database can authenticate. If validation fails, the run continues with its prior routing.
 - With GitHub fork routing, the push target is `repos.fork_url`
