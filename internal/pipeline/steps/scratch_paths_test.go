@@ -219,6 +219,7 @@ func TestStagePipelineChanges_AgentStagedScratchIsUnstaged(t *testing.T) {
 	}
 	writeRepoFiles(t, dir, files)
 	gitCmd(t, dir, "add", "-A")
+	writeRepoFiles(t, dir, map[string]string{"tests/_all.sh": "scratch runner\nrewritten after staging\n"})
 	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
 	logs := captureStepLog(sctx)
 

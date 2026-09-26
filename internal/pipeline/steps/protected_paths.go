@@ -49,7 +49,7 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 		}
 	}
 	if len(unstage) > 0 {
-		if _, err := stepGitRunInput(sctx, nulPathspecs(literalPathspecs(unstage)), "rm", "--cached", "-q", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
+		if _, err := stepGitRunInput(sctx, nulPathspecs(literalPathspecs(unstage)), "rm", "--cached", "-f", "-q", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
 			return err
 		}
 	}
