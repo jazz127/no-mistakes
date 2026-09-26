@@ -2,6 +2,7 @@ package steps
 
 import (
 	"fmt"
+	"io"
 	"path"
 	"strings"
 
@@ -10,8 +11,9 @@ import (
 
 // stagePipelineChanges guards every pipeline-owned catch-all staging path,
 // including Push's leftover commit. Refusal preserves the index and worktree.
-// Untracked tool caches and scratch scripts (scratchRoot) are left out of the
-// index and named in the step log; they stay uncommitted in the run worktree.
+// Tool caches and scratch scripts (scratchRoot) that are untracked or newly
+// added to the index are left out of it and named in the step log; they stay
+// uncommitted in the run worktree.
 func stagePipelineChanges(sctx *pipeline.StepContext) error {
 	// Disable renames so both source and destination are checked, and list
 	// individual untracked files so a protected path or a cache inside a new
@@ -21,7 +23,7 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 	if err != nil {
 		return fmt.Errorf("check protected_paths and scratch: %w", err)
 	}
-	var changed []string
+	var changed, unstage []string
 	scratch := newScratchExclusions()
 	for _, entry := range strings.Split(strings.TrimSuffix(status, "\x00"), "\x00") {
 		if entry == "" {
@@ -31,7 +33,10 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 			return fmt.Errorf("check protected_paths and scratch: invalid git status entry %q", entry)
 		}
 		file := entry[3:]
-		if entry[:2] == "??" && scratch.add(file) {
+		if (entry[:2] == "??" || entry[0] == 'A') && scratch.add(file) {
+			if entry[0] == 'A' {
+				unstage = append(unstage, file)
+			}
 			continue
 		}
 		changed = append(changed, file)
@@ -43,24 +48,38 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 			}
 		}
 	}
-	args := append([]string{"add", "-A", "--", "."}, scratch.pathspecs(changed)...)
-	if _, err := stepGitRun(sctx, args...); err != nil {
+	if len(unstage) > 0 {
+		if _, err := stepGitRunInput(sctx, nulPathspecs(literalPathspecs(unstage)), "rm", "--cached", "-q", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
+			return err
+		}
+	}
+	specs := append([]string{"."}, scratch.pathspecs(changed)...)
+	if _, err := stepGitRunInput(sctx, nulPathspecs(specs), "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
 		return err
 	}
 	if summary := scratch.summary(); summary != "" {
-		sctx.Log("left untracked tool caches and scratch out of the commit (still in the run worktree): " + summary)
+		sctx.Log("left new tool caches and scratch out of the commit (still in the run worktree): " + summary)
 	}
 	return nil
 }
 
+func literalPathspecs(files []string) []string {
+	specs := make([]string, len(files))
+	for i, file := range files {
+		specs[i] = ":(literal)" + file
+	}
+	return specs
+}
+
+func nulPathspecs(specs []string) io.Reader {
+	return strings.NewReader(strings.Join(specs, "\x00") + "\x00")
+}
+
 // scratchCacheDirs are directory names that only ever hold tool caches or
-// installed dependencies. A new untracked file under one is never an intended
-// change: the Document step once committed a Corepack pnpm bundle its agent
-// cached at .codex-live-check/cache/node/corepack.
+// installed dependencies. A new file under one is never an intended change.
 var scratchCacheDirs = map[string]bool{
 	"node_modules":  true,
 	".cache":        true,
-	"corepack":      true,
 	".corepack":     true,
 	".npm":          true,
 	".pnpm-store":   true,
@@ -70,11 +89,14 @@ var scratchCacheDirs = map[string]bool{
 	".ruff_cache":   true,
 }
 
-// scratchRoot reports whether an untracked path is a tool cache or an ad-hoc
-// scratch script, and the path to exclude for it: the cache directory itself,
-// or the script. Scratch scripts are underscore-prefixed shell files such as
-// the tests/_all.sh runner a Test round once committed; dunder names are left
-// alone. Tracked files are never classified.
+// scratchRoot reports whether a new path is a tool cache or an ad-hoc scratch
+// script, and the path to exclude for it: the cache directory itself, or the
+// script. A corepack directory counts only inside a cache or dot directory, as
+// in the .codex-live-check/cache/node/corepack bundle the Document step once
+// committed, so a source directory such as packages/corepack is kept. Scratch
+// scripts are underscore-prefixed shell files directly in a top-level tests or
+// test directory, such as the tests/_all.sh runner a Test round once
+// committed; dunder names are left alone. Tracked files are never classified.
 func scratchRoot(file string) (root, reason string, ok bool) {
 	isDir := strings.HasSuffix(file, "/")
 	parts := strings.Split(strings.TrimSuffix(file, "/"), "/")
@@ -82,13 +104,15 @@ func scratchRoot(file string) (root, reason string, ok bool) {
 	if !isDir {
 		dirs = parts[:len(parts)-1]
 	}
+	inCache := false
 	for i, part := range dirs {
-		if scratchCacheDirs[part] {
+		if scratchCacheDirs[part] || (part == "corepack" && inCache) {
 			return strings.Join(parts[:i+1], "/"), "tool cache", true
 		}
+		inCache = inCache || part == "cache" || strings.HasPrefix(part, ".")
 	}
 	base := parts[len(parts)-1]
-	if !isDir && strings.HasPrefix(base, "_") && !strings.HasPrefix(base, "__") {
+	if !isDir && len(parts) == 2 && (parts[0] == "tests" || parts[0] == "test") && strings.HasPrefix(base, "_") && !strings.HasPrefix(base, "__") {
 		switch path.Ext(base) {
 		case ".sh", ".bash", ".zsh":
 			return file, "scratch script", true
@@ -127,7 +151,7 @@ func (s *scratchExclusions) add(file string) bool {
 	return true
 }
 
-// pathspecs excludes each cache directory whole, keeping the argument list
+// pathspecs excludes each cache directory whole, keeping the pathspec list
 // short for large caches, unless a tracked change lies under it; then only
 // its untracked files are excluded so the tracked change is still staged.
 func (s *scratchExclusions) pathspecs(changed []string) []string {

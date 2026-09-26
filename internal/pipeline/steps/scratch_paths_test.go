@@ -185,3 +185,57 @@ func TestStagePipelineChanges_ScratchUnderProtectedPathDoesNotRefuse(t *testing.
 		t.Fatalf("staged = %v, want only doc.md", staged)
 	}
 }
+
+func TestStagePipelineChanges_SourceFilesResemblingScratchAreStaged(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	writeRepoFiles(t, dir, map[string]string{
+		"scripts/_common.sh":           "helper\n",
+		"packages/corepack/index.js":   "source\n",
+		"tests/unit/_helpers.sh":       "helper\n",
+		"src/tests/_fixtures.bash":     "helper\n",
+		".tool/cache/corepack/pnpm.js": "cached\n",
+	})
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+
+	if err := stagePipelineChanges(sctx); err != nil {
+		t.Fatal(err)
+	}
+	staged := strings.Fields(gitCmd(t, dir, "diff", "--cached", "--name-only"))
+	want := []string{"packages/corepack/index.js", "scripts/_common.sh", "src/tests/_fixtures.bash", "tests/unit/_helpers.sh"}
+	if !slices.Equal(staged, want) {
+		t.Fatalf("staged = %v, want %v", staged, want)
+	}
+}
+
+func TestStagePipelineChanges_AgentStagedScratchIsUnstaged(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	files := map[string]string{"fix.txt": "fixed\n", "tests/_all.sh": "scratch runner\n"}
+	for _, name := range corepackBundle {
+		files[name] = "cached\n"
+	}
+	writeRepoFiles(t, dir, files)
+	gitCmd(t, dir, "add", "-A")
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	logs := captureStepLog(sctx)
+
+	if err := stagePipelineChanges(sctx); err != nil {
+		t.Fatal(err)
+	}
+	staged := strings.Fields(gitCmd(t, dir, "diff", "--cached", "--name-only"))
+	if !slices.Equal(staged, []string{"fix.txt"}) {
+		t.Fatalf("staged = %v, want only fix.txt", staged)
+	}
+	status := gitStatusPorcelain(t, dir)
+	for _, left := range []string{"?? .codex-live-check/", "?? tests/_all.sh"} {
+		if !strings.Contains(status, left) {
+			t.Errorf("unstaged scratch %q should stay untracked in the worktree, status %q", left, status)
+		}
+	}
+	if log := logs(); !strings.Contains(log, "tests/_all.sh (scratch script)") || !strings.Contains(log, ".codex-live-check/cache/node/corepack/ (tool cache, 4 files)") {
+		t.Fatalf("step log does not name the unstaged scratch:\n%s", log)
+	}
+}
