@@ -787,6 +787,18 @@ func (value *GitHubDraftPullRequests) UnmarshalYAML(node *yaml.Node) error {
 	return fmt.Errorf("draft_pull_requests must be a boolean or \"upstream\", got %q", node.Value)
 }
 
+func (value GitHubDraftPullRequests) MarshalYAML() (interface{}, error) {
+	switch value {
+	case GitHubDraftPullRequestsAll:
+		return true, nil
+	case GitHubDraftPullRequestsOff:
+		return false, nil
+	case GitHubDraftPullRequestsUpstream:
+		return string(value), nil
+	}
+	return nil, fmt.Errorf("draft_pull_requests has unknown mode %q", string(value))
+}
+
 // GitLabProviderRaw is the YAML representation of GitLab provider settings.
 // Pointer fields distinguish "not set" (nil) from an explicit false.
 type GitLabProviderRaw struct {
