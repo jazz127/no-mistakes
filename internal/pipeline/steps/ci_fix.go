@@ -187,7 +187,7 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 		// descends from the reviewed, already-published head, so
 		// recordRepair's continuity proof holds and publication is a plain
 		// fast-forward rather than a rewrite the push guards must refuse.
-		if err := mergeWithAgent(ctx, sctx, ciMergeTargetRef(sctx, baseBranch, rebaseBaseSHA)); err != nil {
+		if err := mergeWithAgent(ctx, sctx, rebaseBaseSHA); err != nil {
 			return ciRepairResult{}, fmt.Errorf("merge base branch %q: %w", baseBranch, err)
 		}
 		mergeConflict = false
@@ -309,19 +309,6 @@ CI logs:
 		repair.Summary = conclusion.Summary
 	}
 	return repair, nil
-}
-
-// ciMergeTargetRef names the base tip a merge-strategy conflict repair merges.
-// The fetched remote-tracking ref is preferred so the merge commit carries
-// git's own "Merge remote-tracking branch" subject, exactly as the rebase
-// step's merge does; the pinned SHA is used whenever that ref does not resolve
-// to the tip this repair was prepared against.
-func ciMergeTargetRef(sctx *pipeline.StepContext, baseBranch, tipSHA string) string {
-	ref := "origin/" + baseBranch
-	if sha, err := stepGitRun(sctx, "rev-parse", "--verify", ref); err == nil && strings.EqualFold(strings.TrimSpace(sha), tipSHA) {
-		return ref
-	}
-	return tipSHA
 }
 
 func fetchCILogOutput(ctx context.Context, host scm.Host, pr *scm.PR, branch, headSHA string, targets []scm.CheckTarget, maxBytes int) string {
