@@ -109,6 +109,9 @@ The template does not control commits created by the Rebase or Push steps.
 The Push step uses `no-mistakes: apply agent fixes` for remaining uncommitted changes.
 Repositories can opt into [`protected_paths`](/no-mistakes/reference/repo-config/#protected_paths) to refuse automatic staging when a protected file is dirty, including at this Push catch-all boundary. Refusal preserves the edits for inspection.
 
+Every automatic staging boundary, including Push's, leaves out new untracked tool caches and scratch scripts: any file under a `node_modules`, `.cache`, `corepack`, `.corepack`, `.npm`, `.pnpm-store`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, or `.ruff_cache` directory, and underscore-prefixed shell scripts such as `tests/_all.sh` (not `__` names).
+The step log names what was left out, and those files stay uncommitted in the run worktree. Tracked files are always staged, including edits inside such a directory.
+
 ## Step rounds
 
 Each execution of a step (initial run or follow-up auto-fix run) is recorded as a "round" in the database.
