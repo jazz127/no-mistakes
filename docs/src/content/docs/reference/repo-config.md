@@ -842,12 +842,14 @@ See [global config](/no-mistakes/reference/global-config/#testevidence) for prov
 
 ### providers.github.draft_pull_requests
 
-Override the [global GitHub draft setting](/no-mistakes/reference/global-config/#providersgithubdraft_pull_requests) for this repo.
+Override the [global GitHub draft setting](/no-mistakes/reference/global-config/#providersgithubdraft_pull_requests) for this repo. Set `upstream` to draft PRs whose base repository owner differs from the configured fork owner.
 
 | | |
 |---|---|
-| Type | `bool` |
+| Type | `bool` or `"upstream"` |
 | Default | Inherits from global (default `false`) |
+
+Boolean values retain their existing behavior. In `upstream` mode, no-mistakes compares the owner in the PR's base repository URL with the owner in the configured fork URL, and adds `--draft` when they differ. If either owner is unavailable, it keeps the PR non-draft.
 
 ### providers.gitlab.draft_pull_requests
 

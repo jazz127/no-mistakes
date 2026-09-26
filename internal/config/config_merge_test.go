@@ -184,8 +184,35 @@ func TestLoadRepoFromBytes_ParsesProvidersDraft(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadRepoFromBytes() error = %v", err)
 	}
-	if repo.Providers.GitHub.DraftPullRequests == nil || !*repo.Providers.GitHub.DraftPullRequests {
+	if repo.Providers.GitHub.DraftPullRequests == nil || *repo.Providers.GitHub.DraftPullRequests != GitHubDraftPullRequestsAll {
 		t.Errorf("draft_pull_requests = %v, want true", repo.Providers.GitHub.DraftPullRequests)
+	}
+}
+
+func TestLoadRepoFromBytes_ParsesUpstreamDraftMode(t *testing.T) {
+	repo, err := LoadRepoFromBytes([]byte("providers:\n  github:\n    draft_pull_requests: upstream\n"))
+	if err != nil {
+		t.Fatalf("LoadRepoFromBytes() error = %v", err)
+	}
+	if got := repo.Providers.GitHub.DraftPullRequests; got == nil || *got != GitHubDraftPullRequestsUpstream {
+		t.Errorf("draft_pull_requests = %v, want upstream", got)
+	}
+}
+
+func TestLoadGlobalFromBytes_ParsesUpstreamDraftMode(t *testing.T) {
+	global, err := LoadGlobalFromBytes([]byte("providers:\n  github:\n    draft_pull_requests: upstream\n"))
+	if err != nil {
+		t.Fatalf("LoadGlobalFromBytes() error = %v", err)
+	}
+	cfg := Merge(global, &RepoConfig{})
+	if !cfg.Providers.GitHub.DraftUpstreamPullRequests || cfg.Providers.GitHub.DraftPullRequests {
+		t.Errorf("global upstream mode resolved as %+v", cfg.Providers.GitHub)
+	}
+}
+
+func TestLoadRepoFromBytes_RejectsUnknownGitHubDraftMode(t *testing.T) {
+	if _, err := LoadRepoFromBytes([]byte("providers:\n  github:\n    draft_pull_requests: sometimes\n")); err == nil {
+		t.Fatal("LoadRepoFromBytes() error = nil, want invalid draft mode error")
 	}
 }
 
@@ -197,8 +224,8 @@ func TestMerge_ProvidersDraftDefaultsFalse(t *testing.T) {
 }
 
 func TestMerge_ProvidersRepoOverridesGlobalDraft(t *testing.T) {
-	truthy := true
-	falsy := false
+	truthy := GitHubDraftPullRequestsAll
+	falsy := GitHubDraftPullRequestsOff
 	global := &GlobalConfig{Providers: ProvidersRaw{GitHub: GitHubProviderRaw{DraftPullRequests: &truthy}}}
 
 	if cfg := Merge(global, &RepoConfig{}); !cfg.Providers.GitHub.DraftPullRequests {
@@ -208,6 +235,19 @@ func TestMerge_ProvidersRepoOverridesGlobalDraft(t *testing.T) {
 	repo := &RepoConfig{Providers: ProvidersRaw{GitHub: GitHubProviderRaw{DraftPullRequests: &falsy}}}
 	if cfg := Merge(global, repo); cfg.Providers.GitHub.DraftPullRequests {
 		t.Error("draft_pull_requests = true, want false (repo override)")
+	}
+}
+
+func TestMerge_ProvidersUpstreamDraftModeOverridesGlobal(t *testing.T) {
+	upstream := GitHubDraftPullRequestsUpstream
+	all := GitHubDraftPullRequestsAll
+	global := &GlobalConfig{Providers: ProvidersRaw{GitHub: GitHubProviderRaw{DraftPullRequests: &upstream}}}
+	if cfg := Merge(global, &RepoConfig{}); !cfg.Providers.GitHub.DraftUpstreamPullRequests || cfg.Providers.GitHub.DraftPullRequests {
+		t.Errorf("global upstream mode resolved as %+v", cfg.Providers.GitHub)
+	}
+	repo := &RepoConfig{Providers: ProvidersRaw{GitHub: GitHubProviderRaw{DraftPullRequests: &all}}}
+	if cfg := Merge(global, repo); !cfg.Providers.GitHub.DraftPullRequests || cfg.Providers.GitHub.DraftUpstreamPullRequests {
+		t.Errorf("repo boolean override resolved as %+v", cfg.Providers.GitHub)
 	}
 }
 

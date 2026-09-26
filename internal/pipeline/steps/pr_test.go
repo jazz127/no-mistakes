@@ -426,6 +426,51 @@ func TestPRStep_CreatesConfiguredDraftPR(t *testing.T) {
 	}
 }
 
+func TestPRStep_UpstreamDraftModeUsesRepositoryOwners(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		upstream string
+		fork     string
+		want     bool
+	}{
+		{name: "upstream base", upstream: "https://github.com/kunchenguid/no-mistakes.git", fork: "git@github.com:jazz127/no-mistakes.git", want: true},
+		{name: "same owner house base", upstream: "https://github.com/jazz127/no-mistakes.git", fork: "git@github.com:jazz127/no-mistakes.git", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			env, logFile := fakeGH(t, "")
+			ag := &mockAgent{name: "test"}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Env = env
+			sctx.Repo.UpstreamURL = tc.upstream
+			sctx.Repo.ForkURL = tc.fork
+			sctx.Config.Providers.GitHub.DraftUpstreamPullRequests = true
+			reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sctx.DB.UpdateStepStatus(reviewStep.ID, types.StepStatusCompleted); err != nil {
+				t.Fatal(err)
+			}
+			findings := `{"findings":[],"summary":"clean","risk_level":"medium","risk_rationale":"routine change"}`
+			if err := sctx.DB.SetStepFindings(reviewStep.ID, findings); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := (&PRStep{}).Execute(sctx); err != nil {
+				t.Fatal(err)
+			}
+			logData, err := os.ReadFile(logFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotDraft := strings.Contains(string(logData), "pr create --head jazz127:feature --base main --repo ") && strings.Contains(string(logData), "--draft")
+			if gotDraft != tc.want {
+				t.Errorf("gh pr create draft = %v, want %v; commands:\n%s", gotDraft, tc.want, logData)
+			}
+		})
+	}
+}
+
 func TestPRStep_UsesConfiguredBaseBranch(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
