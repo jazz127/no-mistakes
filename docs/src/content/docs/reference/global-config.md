@@ -1007,7 +1007,7 @@ Open pull requests created on GitHub as drafts (`gh pr create --draft`). Set `up
 | Default | `false` |
 
 Only affects PR creation; existing PRs are not toggled between draft and ready. GitHub only — ignored for other providers.
-`true` and `false` retain their existing behavior. In `upstream` mode, no-mistakes compares the owner in the PR's base repository URL with the owner in the configured fork URL, and adds `--draft` when they differ. If either owner is unavailable, it keeps the PR non-draft. This lets house systems draft upstream PRs while leaving same-owner fork PRs ready for review. This is a global default; per-repo config can override it via `providers.github.draft_pull_requests`.
+`true` and `false` retain their existing behavior. In `upstream` mode, no-mistakes compares the owner in the PR's base repository URL with the owner in the configured fork URL, and adds `--draft` when they differ (compared case-insensitively). If either owner is unavailable, it keeps the PR non-draft. This lets house systems draft upstream PRs while leaving same-owner fork PRs ready for review. This is a global default; per-repo config can override it via `providers.github.draft_pull_requests`.
 
 ### providers.gitlab.draft_pull_requests
 

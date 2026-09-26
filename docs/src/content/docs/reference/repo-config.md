@@ -849,7 +849,7 @@ Override the [global GitHub draft setting](/no-mistakes/reference/global-config/
 | Type | `bool` or `"upstream"` |
 | Default | Inherits from global (default `false`) |
 
-Boolean values retain their existing behavior. In `upstream` mode, no-mistakes compares the owner in the PR's base repository URL with the owner in the configured fork URL, and adds `--draft` when they differ. If either owner is unavailable, it keeps the PR non-draft.
+The [global reference](/no-mistakes/reference/global-config/#providersgithubdraft_pull_requests) owns the `upstream` owner-comparison rules.
 
 ### providers.gitlab.draft_pull_requests
 
