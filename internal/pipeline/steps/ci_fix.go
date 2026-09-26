@@ -179,6 +179,28 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	if mergeConflict {
 		promptBaseSHA = rebaseBaseSHA
 	}
+	if mergeConflict && mergesMovedBase(sctx) {
+		// Under rebase.strategy: merge the conflict is repaired the way the
+		// rebase step integrates a moved base: the pipeline merges the base
+		// into the reviewed head itself, through mergeWithAgent's proven shape,
+		// instead of asking the fixer to rebase. The repaired head then
+		// descends from the reviewed, already-published head, so
+		// recordRepair's continuity proof holds and publication is a plain
+		// fast-forward rather than a rewrite the push guards must refuse.
+		if err := mergeWithAgent(ctx, sctx, ciMergeTargetRef(sctx, baseBranch, rebaseBaseSHA)); err != nil {
+			return ciRepairResult{}, fmt.Errorf("merge base branch %q: %w", baseBranch, err)
+		}
+		mergeConflict = false
+		targets = targets.withoutMergeConflict()
+		failingNames = targets.checkNames()
+		if targets.empty() {
+			repair, err := s.commitRepair(sctx, "merge "+baseBranch+" into branch")
+			if err == nil && repair.HeadAdvanced {
+				repair.Summary = "merged " + baseBranch + " into branch"
+			}
+			return repair, err
+		}
+	}
 
 	const maxLogBytes = 32 * 1024
 	var logOutput string
@@ -287,6 +309,19 @@ CI logs:
 		repair.Summary = conclusion.Summary
 	}
 	return repair, nil
+}
+
+// ciMergeTargetRef names the base tip a merge-strategy conflict repair merges.
+// The fetched remote-tracking ref is preferred so the merge commit carries
+// git's own "Merge remote-tracking branch" subject, exactly as the rebase
+// step's merge does; the pinned SHA is used whenever that ref does not resolve
+// to the tip this repair was prepared against.
+func ciMergeTargetRef(sctx *pipeline.StepContext, baseBranch, tipSHA string) string {
+	ref := "origin/" + baseBranch
+	if sha, err := stepGitRun(sctx, "rev-parse", "--verify", ref); err == nil && strings.EqualFold(strings.TrimSpace(sha), tipSHA) {
+		return ref
+	}
+	return tipSHA
 }
 
 func fetchCILogOutput(ctx context.Context, host scm.Host, pr *scm.PR, branch, headSHA string, targets []scm.CheckTarget, maxBytes int) string {
@@ -667,14 +702,17 @@ func ciRepairPolicyDescription(sctx *pipeline.StepContext) string {
 //
 // ci.revalidate_repairs governs intent identically on every path: true asks for
 // revalidation outright, false asks to publish when it is safe to do so. Merge
-// conflict repairs are not carved out - they simply always land in the
+// conflict repairs are not carved out. A rebased one simply always lands in the
 // cannot-be-proven half, because a rebase makes the repaired head a
 // non-descendant of the reviewed head, resolving a conflict changes the
 // commit's patch-id, and no content-based guard can separate "rebased and
 // resolved" from "dropped the work". Provenance cannot stand in for that proof
 // either: the repair that deleted a reviewed commit in the reproduction behind
 // this rule was authored by the CI repair agent itself. Who wrote the repair
-// says nothing about what it did to the reviewed commits.
+// says nothing about what it did to the reviewed commits. A conflict repaired
+// by merging (rebase.strategy: merge) keeps the reviewed head as an ancestor,
+// so it lands in the provable half by the same ancestry test and needs no
+// exception either.
 //
 // Once recording or publication succeeds, the run's recorded head advances;
 // the two paths differ in whether the repair is published now or held until
