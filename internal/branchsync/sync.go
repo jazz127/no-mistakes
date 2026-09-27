@@ -680,8 +680,8 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		return blockedPlan(state, StatePipelineOwned, "blocked_recover_run_active", "the run that owns this branch is still active; drive it to completion or abort it first; no files or refs were changed")
 	}
 	if keepLocal && s.publishedMissingHead(ctx, state, run) {
-		// Nothing in Git needs to move: both the gate and the configured push
-		// target are already at the exact checked-out branch head. Recheck the
+		// Nothing in Git needs to move: the configured push target is already
+		// at the exact checked-out branch head. Recheck the
 		// local evidence and remote immediately before the conditional stamp.
 		fresh, freshRun, _ := s.inspect(ctx)
 		if freshRun == nil || freshRun.ID != run.ID || fresh.Local != state.Local || !s.publishedMissingHead(ctx, fresh, freshRun) {
@@ -931,8 +931,10 @@ func publishedMissingHeadPlan(state State) State {
 
 // publishedMissingHead is deliberately narrower than ordinary keep-local.
 // It permits an unverified recorded head only when the object is absent from
-// both local repositories and the current head agrees with the gate AND the
-// live configured push target. No Git ref is changed by this recovery.
+// both local repositories, the gate lane is present, and the current head
+// agrees with the live configured push target. The gate lane may still be at
+// the submitted head; adopt_published updates it afterward. No Git ref is
+// changed by this recovery.
 func (s *Service) publishedMissingHead(ctx context.Context, state State, run *db.Run) bool {
 	if run == nil || state.State != StatePipelineOwned || !terminalRunStatus(run.Status) ||
 		!unpublishedPipelineHead(run) || !state.Local.Clean || run.PushActive ||
@@ -961,8 +963,7 @@ func (s *Service) publishedMissingHead(ctx context.Context, state State, run *db
 	if symbolic, err := git.Run(ctx, s.GateDir, "symbolic-ref", "-q", gateRef); err == nil && symbolic != "" {
 		return false
 	}
-	gateHead, err := git.Run(ctx, s.GateDir, "rev-parse", gateRef+"^{commit}")
-	if err != nil || gateHead != state.Local.Head {
+	if _, err := git.Run(ctx, s.GateDir, "rev-parse", gateRef+"^{commit}"); err != nil {
 		return false
 	}
 	runs, err := s.DB.GetRunsByRepo(s.Repo.ID)

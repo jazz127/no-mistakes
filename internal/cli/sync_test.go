@@ -1282,14 +1282,20 @@ func TestAxiSyncRecoverDivergedRefusesThenKeepLocalSucceeds(t *testing.T) {
 
 func TestAxiSyncReleasesMissingTerminalHeadAtPublishedBranch(t *testing.T) {
 	f := newCLIRecoverFixture(t)
-	if err := os.WriteFile(filepath.Join(f.local, "published.txt"), []byte("later branch\n"), 0o644); err != nil {
+	// The pipeline worked in a detached worktree, so the gate lane stays at the
+	// submitted head once that worktree is gone.
+	cliGit(t, f.gate, "update-ref", "refs/heads/feature/recover", f.submitted, f.preserved)
+	cliGit(t, f.local, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(f.local, "published.txt"), []byte("later base\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cliGit(t, f.local, "add", "published.txt")
-	cliGit(t, f.local, "commit", "-m", "publish later branch")
+	cliGit(t, f.local, "commit", "-m", "advance base")
+	cliGit(t, f.local, "push", f.remote, "main:refs/heads/main")
+	cliGit(t, f.local, "checkout", "feature/recover")
+	cliGit(t, f.local, "merge", "--no-edit", "main")
 	published := cliGit(t, f.local, "rev-parse", "HEAD")
 	cliGit(t, f.local, "push", f.remote, "HEAD:refs/heads/feature/recover")
-	cliGit(t, f.local, "push", "--force", f.gate, "HEAD:refs/heads/feature/recover")
 	cliGit(t, f.gate, "reflog", "expire", "--expire=now", "--all")
 	cliGit(t, f.gate, "gc", "--prune=now")
 	if _, err := git.Run(context.Background(), f.gate, "cat-file", "-e", f.preserved+"^{commit}"); err == nil {
@@ -1308,10 +1314,13 @@ func TestAxiSyncReleasesMissingTerminalHeadAtPublishedBranch(t *testing.T) {
 	if err != nil || !strings.Contains(recovered, "recovered: true") || !strings.Contains(recovered, "changed: false") {
 		t.Fatalf("published-head custody return: %v\n%s", err, recovered)
 	}
-	for _, dir := range []string{f.local, f.gate, f.remote} {
+	for _, dir := range []string{f.local, f.remote} {
 		if head := cliGit(t, dir, "rev-parse", "refs/heads/feature/recover"); head != published {
 			t.Fatalf("%s moved to %s, want %s", dir, head, published)
 		}
+	}
+	if head := cliGit(t, f.gate, "rev-parse", "refs/heads/feature/recover"); head != f.submitted {
+		t.Fatalf("gate lane moved to %s, want %s", head, f.submitted)
 	}
 	env, err := openAxiEnv(false)
 	if err != nil {
