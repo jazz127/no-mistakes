@@ -1280,6 +1280,71 @@ func TestAxiSyncRecoverDivergedRefusesThenKeepLocalSucceeds(t *testing.T) {
 	}
 }
 
+func TestAxiSyncReleasesMissingTerminalHeadAtPublishedBranch(t *testing.T) {
+	f := newCLIRecoverFixture(t)
+	// The pipeline worked in a detached worktree, so the gate lane stays at the
+	// submitted head once that worktree is gone.
+	cliGit(t, f.gate, "update-ref", "refs/heads/feature/recover", f.submitted, f.preserved)
+	cliGit(t, f.local, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(f.local, "published.txt"), []byte("later base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cliGit(t, f.local, "add", "published.txt")
+	cliGit(t, f.local, "commit", "-m", "advance base")
+	cliGit(t, f.local, "push", f.remote, "main:refs/heads/main")
+	cliGit(t, f.local, "checkout", "feature/recover")
+	cliGit(t, f.local, "merge", "--no-edit", "main")
+	published := cliGit(t, f.local, "rev-parse", "HEAD")
+	cliGit(t, f.local, "push", f.remote, "HEAD:refs/heads/feature/recover")
+	cliGit(t, f.gate, "reflog", "expire", "--expire=now", "--all")
+	cliGit(t, f.gate, "gc", "--prune=now")
+	if _, err := git.Run(context.Background(), f.gate, "cat-file", "-e", f.preserved+"^{commit}"); err == nil {
+		t.Fatal("fixture retained the recorded head")
+	}
+	status, err := executeCmd("axi", "status", "--run", f.runID)
+	if err != nil || !strings.Contains(status, "blocked_recover_manual_reconciliation") {
+		t.Fatalf("stuck status: %v\n%s", err, status)
+	}
+	check, err := executeCmd("axi", "sync", "--check")
+	var ee *exitError
+	if err == nil || !asExitError(err, &ee) || ee.code != 1 || !strings.Contains(check, "blocked_recover_published_head") || !strings.Contains(check, "command: no-mistakes axi sync --recover --keep-local") {
+		t.Fatalf("published-head plan: %v\n%s", err, check)
+	}
+	recovered, err := executeCmd("axi", "sync", "--recover", "--keep-local")
+	if err != nil || !strings.Contains(recovered, "recovered: true") || !strings.Contains(recovered, "changed: false") {
+		t.Fatalf("published-head custody return: %v\n%s", err, recovered)
+	}
+	for _, dir := range []string{f.local, f.remote} {
+		if head := cliGit(t, dir, "rev-parse", "refs/heads/feature/recover"); head != published {
+			t.Fatalf("%s moved to %s, want %s", dir, head, published)
+		}
+	}
+	if head := cliGit(t, f.gate, "rev-parse", "refs/heads/feature/recover"); head != f.submitted {
+		t.Fatalf("gate lane moved to %s, want %s", head, f.submitted)
+	}
+	env, err := openAxiEnv(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked := freshRunBranchOwnershipState(context.Background(), env); blocked != nil {
+		t.Fatalf("fresh axi run still blocked by old custody: %#v", blocked)
+	}
+	env.close()
+	p, err := paths.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	run, err := database.GetRun(f.runID)
+	if err != nil || run == nil || run.CustodyReturnedHeadSHA == nil || *run.CustodyReturnedHeadSHA != published {
+		t.Fatalf("release record: %#v, %v", run, err)
+	}
+}
+
 func TestAxiArchiveBackedRecoveryKeepsExactRequiredHeadAndBothHistories(t *testing.T) {
 	f := newCLIDivergentArchiveFixture(t)
 	if _, err := git.Run(context.Background(), f.local, "merge-base", "--is-ancestor", f.submitted, f.preserved); err == nil {

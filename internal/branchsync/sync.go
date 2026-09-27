@@ -284,6 +284,9 @@ func (s *Service) InspectCached(ctx context.Context) State {
 // no-mistakes ref. It never updates an ordinary remote-tracking ref.
 func (s *Service) Refresh(ctx context.Context) State {
 	state, run, ok := s.inspect(ctx)
+	if state.State == StatePipelineOwned && s.publishedMissingHead(ctx, state, run) {
+		return publishedMissingHeadPlan(state)
+	}
 	if !ok || !refreshable(state) {
 		return state
 	}
@@ -676,6 +679,22 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	if !terminalRunStatus(run.Status) {
 		return blockedPlan(state, StatePipelineOwned, "blocked_recover_run_active", "the run that owns this branch is still active; drive it to completion or abort it first; no files or refs were changed")
 	}
+	if keepLocal && s.publishedMissingHead(ctx, state, run) {
+		// Nothing in Git needs to move: the configured push target is already
+		// at the exact checked-out branch head. Recheck the
+		// local evidence and remote immediately before the conditional stamp.
+		fresh, freshRun, _ := s.inspect(ctx)
+		if freshRun == nil || freshRun.ID != run.ID || fresh.Local != state.Local || !s.publishedMissingHead(ctx, fresh, freshRun) {
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the published branch or terminal run changed during custody recovery; no files or refs were changed")
+		}
+		stamped, err := s.DB.SetRunCustodyReturnedAtPublishedHead(run.ID, run.Status, run.HeadSHA, state.Local.Head)
+		if err != nil || !stamped {
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_stamp_failed", "the exact published-head custody return could not be recorded; no files or refs were changed")
+		}
+		returned, _, _ := s.inspect(ctx)
+		returned.Recovered = true
+		return returned
+	}
 	if keepLocal {
 		runIDs, candidateHeads, anyMissing, allEligible := s.missingHeadKeepLocalRuns(ctx, &state, run)
 		if anyMissing && !allEligible {
@@ -898,6 +917,84 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right HEAD..." + anchorRef}
 		return blocked
 	}
+}
+
+func publishedMissingHeadPlan(state State) State {
+	state.Safety = "blocked_recover_published_head"
+	state.Error = "the terminal run's recorded head is missing, while the checked-out head is already published; return custody at that exact published head without moving Git"
+	state.Remote.ObservedHead = state.Local.Head
+	state.Remote.Freshness = "live"
+	state.Remote.ObservedAt = time.Now().Unix()
+	state.NextAction = &NextAction{Code: "recover_custody", Command: "no-mistakes axi sync --recover --keep-local"}
+	return state
+}
+
+// publishedMissingHead is deliberately narrower than ordinary keep-local.
+// It permits an unverified recorded head only when the object is absent from
+// both local repositories, the gate lane is present, and the current head
+// agrees with the live configured push target. The gate lane may still be at
+// the submitted head; the next axi run gate push updates it. No Git ref is
+// changed by this recovery.
+func (s *Service) publishedMissingHead(ctx context.Context, state State, run *db.Run) bool {
+	if run == nil || state.State != StatePipelineOwned || !terminalRunStatus(run.Status) ||
+		!unpublishedPipelineHead(run) || !state.Local.Clean || run.PushActive ||
+		strings.TrimSpace(s.GateDir) == "" || !fullRecordedHead(run.HeadSHA, state.Local.Head) {
+		return false
+	}
+	if _, err := os.Stat(s.GateDir); err != nil {
+		return false
+	}
+	for _, dir := range []string{s.workDir(), s.GateDir} {
+		if _, err := git.Run(ctx, dir, "cat-file", "-e", run.HeadSHA); err == nil {
+			// A non-commit object is conflicting evidence, not a missing head.
+			return false
+		}
+	}
+	if duplicateBranchCheckout(ctx, s.workDir(), state.Local.Branch) {
+		return false
+	}
+	for _, dir := range []string{s.workDir(), s.GateDir} {
+		compatible, err := recoveryAnchorCompatible(ctx, dir, run.ID, run.HeadSHA)
+		if err != nil || !compatible {
+			return false
+		}
+	}
+	gateRef := "refs/heads/" + state.Local.Branch
+	if symbolic, err := git.Run(ctx, s.GateDir, "symbolic-ref", "-q", gateRef); err == nil && symbolic != "" {
+		return false
+	}
+	if _, err := git.Run(ctx, s.GateDir, "rev-parse", gateRef+"^{commit}"); err != nil {
+		return false
+	}
+	runs, err := s.DB.GetRunsByRepo(s.Repo.ID)
+	if err != nil {
+		return false
+	}
+	for _, candidate := range runs {
+		if candidate.ID != run.ID && candidate.Branch == run.Branch && unpublishedPipelineHead(candidate) {
+			return false
+		}
+	}
+	repo, err := s.DB.GetRepo(s.Repo.ID)
+	if err != nil || repo == nil {
+		return false
+	}
+	pushURL := s.resolvedPushURL(ctx, repo)
+	if pushURL == "" {
+		return false
+	}
+	liveCtx, cancel := context.WithTimeout(ctx, s.remoteTimeout())
+	live, err := s.runLsRemote(liveCtx, s.workDir(), pushURL, "refs/heads/"+state.Local.Branch)
+	cancel()
+	return err == nil && live != "" && live == state.Local.Head
+}
+
+func fullRecordedHead(recorded, local string) bool {
+	if len(recorded) != len(local) || (len(recorded) != 40 && len(recorded) != 64) || recorded != strings.ToLower(recorded) {
+		return false
+	}
+	_, err := hex.DecodeString(recorded)
+	return err == nil
 }
 
 // recoverKeepLocal performs the explicit keep-local custody return: the
