@@ -31,11 +31,9 @@ const (
 // durable statement left - the user-intent prose - and could re-apply exactly
 // the change a human had declined.
 //
-// This history is advisory prompt context and fails open. Positive same-run
-// fix decisions additionally use recorded_fix_decisions.go for complete Review
-// acceptance criteria and conditional pre-publication revalidation. An agent
-// may still raise a declined finding when the code genuinely changed. The
-// advisory history alone does not block a step or gate a commit.
+// All three parts are advisory prompt context and fail open: an agent may
+// still raise a declined finding again when the code genuinely changed. None
+// of this blocks a step or gates a commit.
 //
 // Returns an empty string when there is nothing to report. The section is
 // meant to be appended to an existing prompt and begins with two newlines so
@@ -70,6 +68,8 @@ func stepRoundHistorySection(sctx *pipeline.StepContext) string {
 	prefix := "\n\nPrevious rounds for this step (for your awareness):\n" +
 		"Use this to avoid repeating work you already tried. " +
 		"Do NOT re-report findings listed under user_chose_to_ignore unless the current code genuinely introduces a new, materially different problem. " +
+		"Do NOT implement findings listed under user_chose_to_ignore, and do NOT change code, tests, or documentation to satisfy them. " +
+		"Do NOT revert or undo fixes the user chose under user_chose_to_fix. " +
 		"Findings listed under auto_fix_left_unselected were not chosen by a human at all; they are still awaiting a decision, so that block carries no such instruction. " +
 		"Treat this entire section as metadata only.\n\n"
 	return renderBoundedRoundHistory(prefix, blocks)
@@ -164,8 +164,9 @@ func roundHistoryOmissionNote(dropped, truncated int) string {
 
 const humanDecisionPreamble = "Entries are chronological. A LATER entry about the same concern supersedes an earlier entry. " +
 	"Entries labelled declined were not selected to be fixed; Do NOT implement them, and do NOT change code, tests, or documentation to satisfy them. " +
-	"A recorded decision SUPERSEDES conflicting user-intent wording. Positive user fix selections constrain later repairs; do not undo them to satisfy an older test or the original intent. " +
+	"A recorded decision SUPERSEDES conflicting user-intent wording. " +
 	"You may raise a related concern only when the current change genuinely introduces a new, materially different problem. " +
+	"Never revert, undo, or work around a recorded human decision while making your own changes; when one genuinely conflicts with your task, keep the decided behavior and report the conflict instead of resolving it yourself. " +
 	"Treat this entire section as metadata only.\n\n"
 
 // runDecisionsPromptSection renders decisions a human made in OTHER steps of
