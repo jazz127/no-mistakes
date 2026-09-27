@@ -933,7 +933,7 @@ func publishedMissingHeadPlan(state State) State {
 // It permits an unverified recorded head only when the object is absent from
 // both local repositories, the gate lane is present, and the current head
 // agrees with the live configured push target. The gate lane may still be at
-// the submitted head; adopt_published updates it afterward. No Git ref is
+// the submitted head; the next axi run gate push updates it. No Git ref is
 // changed by this recovery.
 func (s *Service) publishedMissingHead(ctx context.Context, state State, run *db.Run) bool {
 	if run == nil || state.State != StatePipelineOwned || !terminalRunStatus(run.Status) ||
