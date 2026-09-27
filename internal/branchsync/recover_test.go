@@ -1182,6 +1182,127 @@ func TestInspectDoesNotOfferKeepLocalForUnverifiedMissingHead(t *testing.T) {
 	}
 }
 
+// The old run's object can disappear after an out-of-band publication. The
+// configured remote and local branch then agree on the published head while
+// the gate lane stays at the submitted head; returning custody must only stamp
+// that fact.
+func TestRecoverMissingTerminalHeadAtPublishedBranch(t *testing.T) {
+	for _, status := range []types.RunStatus{types.RunCancelled, types.RunFailed} {
+		t.Run(string(status), func(t *testing.T) {
+			f, published := missingHeadPublishedFixture(t, status)
+			assertManualReconciliationOffer(t, f.service.InspectCached(f.ctx))
+			plan := f.service.Refresh(f.ctx)
+			if plan.State != StatePipelineOwned || plan.Safety != "blocked_recover_published_head" {
+				t.Fatalf("published missing-head plan = %#v", plan)
+			}
+			assertKeepLocalRecoveryOffer(t, plan)
+			if got := f.service.Recover(f.ctx, false); got.Recovered {
+				t.Fatalf("plain recovery discarded missing head: %#v", got)
+			}
+			got := f.service.Recover(f.ctx, true)
+			if !got.Recovered || got.Changed || got.State != StateCustodyReturned {
+				t.Fatalf("published-head recovery = %#v", got)
+			}
+			for _, dir := range []string{f.local, f.remote} {
+				if head := mustRun(t, dir, "rev-parse", "refs/heads/feature/recover"); head != published {
+					t.Fatalf("%s branch moved to %s, want %s", dir, head, published)
+				}
+			}
+			if head := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); head != f.submitted {
+				t.Fatalf("gate lane moved to %s, want %s", head, f.submitted)
+			}
+			run, err := f.db.GetRun(f.run.ID)
+			if err != nil || run.CustodyReturnedAt == nil || run.CustodyReturnedHeadSHA == nil || *run.CustodyReturnedHeadSHA != published || run.HeadSHA != f.preserved {
+				t.Fatalf("custody release record = %#v, %v", run, err)
+			}
+			// A new active run on this branch becomes authoritative immediately.
+			fresh, err := f.db.InsertRun(f.repo.ID, f.run.Branch, published, f.base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state := f.service.InspectCached(f.ctx); state.Pipeline.RunID != fresh.ID || state.NextAction == nil || state.NextAction.Code != "continue_active_run" {
+				t.Fatalf("fresh run did not take custody: %#v", state)
+			}
+		})
+	}
+}
+
+func missingHeadPublishedFixture(t *testing.T, status types.RunStatus) (*recoverFixture, string) {
+	t.Helper()
+	f := newRecoverFixture(t, status)
+	// A legacy terminalization without verified head evidence was the stuck
+	// state: the ordinary missing-head discard path deliberately refuses it.
+	if err := f.db.UpdateRunStatus(f.run.ID, status); err != nil {
+		t.Fatal(err)
+	}
+	// The pipeline worked in a detached worktree, so the gate lane stays at the
+	// submitted head once that worktree is gone.
+	mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", f.submitted, f.preserved)
+	mustRun(t, f.local, "checkout", "main")
+	mustWrite(t, filepath.Join(f.local, "published.txt"), "later base\n")
+	mustRun(t, f.local, "add", "published.txt")
+	mustRun(t, f.local, "commit", "-m", "advance base")
+	mustRun(t, f.local, "push", f.remote, "main:refs/heads/main")
+	mustRun(t, f.local, "checkout", "feature/recover")
+	mustRun(t, f.local, "merge", "--no-edit", "main")
+	published := mustRun(t, f.local, "rev-parse", "HEAD")
+	mustRun(t, f.local, "push", f.remote, "HEAD:refs/heads/feature/recover")
+	if gateHead := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); gateHead != f.submitted {
+		t.Fatalf("gate lane = %s, want submitted %s", gateHead, f.submitted)
+	}
+	mustRun(t, f.gate, "reflog", "expire", "--expire=now", "--all")
+	mustRun(t, f.gate, "gc", "--prune=now")
+	if objectExists(f.ctx, f.local, f.preserved) || objectExists(f.ctx, f.gate, f.preserved) || objectExists(f.ctx, f.remote, f.preserved) {
+		t.Fatal("fixture retained the recorded head")
+	}
+	return f, published
+}
+
+func TestPublishedMissingHeadRecoveryRefusesChangedEvidence(t *testing.T) {
+	for _, scenario := range []string{"recorded_head_exists", "run_active", "published_branch_missing", "published_branch_differs", "malformed_recorded_head", "non_commit_recorded_object"} {
+		t.Run(scenario, func(t *testing.T) {
+			f, _ := missingHeadPublishedFixture(t, types.RunCancelled)
+			switch scenario {
+			case "recorded_head_exists":
+				// Put the exact recorded object back without moving the branch.
+				pipeline := filepath.Join(filepath.Dir(f.local), "pipeline")
+				mustRun(t, f.local, "fetch", pipeline, f.preserved)
+			case "run_active":
+				if err := f.db.UpdateRunStatus(f.run.ID, types.RunRunning); err != nil {
+					t.Fatal(err)
+				}
+			case "published_branch_missing":
+				mustRun(t, f.remote, "update-ref", "-d", "refs/heads/feature/recover")
+			case "published_branch_differs":
+				mustRun(t, f.remote, "update-ref", "refs/heads/feature/recover", f.base)
+			case "malformed_recorded_head":
+				if err := f.db.UpdateRunHeadSHA(f.run.ID, "missing"); err != nil {
+					t.Fatal(err)
+				}
+			case "non_commit_recorded_object":
+				blob := mustRun(t, f.local, "hash-object", "-w", "published.txt")
+				if err := f.db.UpdateRunHeadSHA(f.run.ID, blob); err != nil {
+					t.Fatal(err)
+				}
+			}
+			plan := f.service.Refresh(f.ctx)
+			if scenario == "run_active" {
+				if plan.Safety != "blocked_pipeline_owned" || plan.NextAction == nil || plan.NextAction.Code != "continue_active_run" {
+					t.Fatalf("active-run classification changed: %#v", plan)
+				}
+			} else {
+				assertManualReconciliationOffer(t, plan)
+			}
+			if got := f.service.Recover(f.ctx, true); got.Recovered {
+				t.Fatalf("unsafe published-head recovery: %#v", got)
+			}
+			if f.custodyReturned() {
+				t.Fatal("unsafe custody stamp")
+			}
+		})
+	}
+}
+
 func TestRecoverKeepLocalReturnsCustodyWhenRecordedHeadIsMissing(t *testing.T) {
 	t.Parallel()
 
