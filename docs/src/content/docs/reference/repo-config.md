@@ -842,12 +842,14 @@ See [global config](/no-mistakes/reference/global-config/#testevidence) for prov
 
 ### providers.github.draft_pull_requests
 
-Override the [global GitHub draft setting](/no-mistakes/reference/global-config/#providersgithubdraft_pull_requests) for this repo.
+Override the [global GitHub draft setting](/no-mistakes/reference/global-config/#providersgithubdraft_pull_requests) for this repo. Set `upstream` to draft PRs whose base repository owner differs from the configured fork owner.
 
 | | |
 |---|---|
-| Type | `bool` |
+| Type | `bool` or `"upstream"` |
 | Default | Inherits from global (default `false`) |
+
+The [global reference](/no-mistakes/reference/global-config/#providersgithubdraft_pull_requests) owns the `upstream` owner-comparison rules.
 
 ### providers.gitlab.draft_pull_requests
 
