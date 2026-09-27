@@ -37,8 +37,9 @@ func newSyncCmd() *cobra.Command {
 			"(user_owned) and makes --recover a no-op. --recover --keep-local keeps the\n" +
 			"current local head and never touches the worktree; available preserved commits\n" +
 			"stay anchored, while genuinely missing preserved commits are discarded.\n" +
-			"If the clean local and gate heads already match the live published branch,\n" +
-			"a terminal missing-head recovery only records custody at that head.\n" +
+			"If the clean local head already matches the live published branch and the\n" +
+			"gate branch is present (at any head), a terminal missing-head recovery only\n" +
+			"records custody at that head without moving any Git ref.\n" +
 			"--bind-archive-ref records one exact existing refs/heads/archive/* commit as\n" +
 			"evidence for the narrow keep-local recovery that stays at a required head while\n" +
 			"a divergent later head remains archived; it never creates or moves a Git ref.\n" +
