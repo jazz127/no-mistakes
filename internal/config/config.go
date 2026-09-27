@@ -888,6 +888,10 @@ type Review struct {
 // TestRaw is the YAML representation of test-step settings.
 type TestRaw struct {
 	Evidence EvidenceRaw `yaml:"evidence"`
+	// Prepare eagerly runs commands.prepare before agent-only Test, including
+	// repair turns. Repository-only and trusted-only regardless of
+	// allow_repo_commands; a pushed branch cannot authorize this trigger.
+	Prepare bool `yaml:"prepare"`
 	// Instructions is the repository's live-validation runbook: how to stand
 	// the product up in an isolated environment so the test step can drive
 	// end-user scenarios against the real thing. It is injected into the test
@@ -940,10 +944,11 @@ type EvidenceRaw struct {
 	MaxRuns   *int    `yaml:"max_runs"`
 }
 
-// Test is the resolved test-step config. Instructions and
+// Test is the resolved test-step config. Prepare, Instructions and
 // AllowApproveOverFailure come from the trusted default-branch repo config
 // only (see TestRaw).
 type Test struct {
+	Prepare                 bool
 	Evidence                Evidence
 	Instructions            string
 	AllowApproveOverFailure string
@@ -2634,10 +2639,11 @@ func validatePathInstructionGlob(pattern string) error {
 // PR title format, and providers) are always taken from the pushed copy, matching prior behavior,
 // since they cannot run arbitrary shell, select a process, or spend the
 // maintainer's CI minutes.
-// The exceptions inside test are evidence.branch, which names a git ref the
-// daemon pushes to, instructions, which steers the gate that validates the
-// pushed branch, and allow_approve_over_failure, which waives the required
-// check for an approved-over-failure commands.test. All three are trusted-only.
+// The exceptions inside test are prepare, which eagerly runs setup before an
+// agent-only Test, evidence.branch, which names a git ref the daemon pushes to,
+// instructions, which steers the gate that validates the pushed branch, and
+// allow_approve_over_failure, which waives the required check for an
+// approved-over-failure commands.test. All four are trusted-only.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
 	if pushed == nil {
 		pushed = &RepoConfig{}
@@ -2706,6 +2712,9 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// must not be able to rewrite or weaken the guidance that steers the
 		// gate validating their own branch.
 		effective.Test.Instructions = trusted.Test.Instructions
+		// The eager setup trigger is trusted-only even when executable command
+		// values may come from the pushed branch.
+		effective.Test.Prepare = trusted.Test.Prepare
 		// test.allow_approve_over_failure opts the required check into
 		// accepting a Test step approved over a failing commands.test. It is
 		// trusted-only for the same reason no_ci is: a pushed branch must not
@@ -2733,6 +2742,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Rebase = RebaseRaw{}
 		effective.Test.Evidence.Branch = nil
 		effective.Test.Instructions = ""
+		effective.Test.Prepare = false
 		effective.Test.AllowApproveOverFailure = ""
 		if !allowRepoCommands {
 			effective.PR.BaseBranch = ""
@@ -3150,6 +3160,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	// the repository only - never from global config, which has no repository
 	// to describe. repo here is the EffectiveRepoConfig result, so this value
 	// is already trusted-only.
+	test.Prepare = repo.Test.Prepare
 	test.Instructions = strings.TrimSpace(repo.Test.Instructions)
 	test.AllowApproveOverFailure = strings.TrimSpace(repo.Test.AllowApproveOverFailure)
 
