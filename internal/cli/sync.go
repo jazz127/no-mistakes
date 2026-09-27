@@ -37,6 +37,8 @@ func newSyncCmd() *cobra.Command {
 			"(user_owned) and makes --recover a no-op. --recover --keep-local keeps the\n" +
 			"current local head and never touches the worktree; available preserved commits\n" +
 			"stay anchored, while genuinely missing preserved commits are discarded.\n" +
+			"If the clean local and gate heads already match the live published branch,\n" +
+			"a terminal missing-head recovery only records custody at that head.\n" +
 			"--bind-archive-ref records one exact existing refs/heads/archive/* commit as\n" +
 			"evidence for the narrow keep-local recovery that stays at a required head while\n" +
 			"a divergent later head remains archived; it never creates or moves a Git ref.\n" +
@@ -93,6 +95,8 @@ func newAxiSyncCmd() *cobra.Command {
 			"--check performs the same fresh read-only plan. Blocked states change nothing.\n" +
 			"--recover performs the guarded custody return offered by\n" +
 			"next_action.code: recover_custody; --keep-local keeps the current local head.\n" +
+			"For a missing terminal head already replaced by the exact published head,\n" +
+			"it records custody at that head without moving any branch.\n" +
 			"--bind-archive-ref binds one exact existing refs/heads/archive/* commit to\n" +
 			"the selected terminal run; it never creates or moves a Git ref.\n" +
 			"--adopt-published performs the guarded gate-lane recovery offered by\n" +
