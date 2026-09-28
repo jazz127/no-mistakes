@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.85.1](https://github.com/kunchenguid/no-mistakes/compare/v1.85.0...v1.85.1) (2026-09-28)
+
+
+### Bug Fixes
+
+* **branchsync:** recover from rewritten remote push bindings ([#1195](https://github.com/kunchenguid/no-mistakes/issues/1195)) ([10de791](https://github.com/kunchenguid/no-mistakes/commit/10de791c738136d428f88c8d92465e56efe38c33))
+* **pipeline:** complete review coverage in one focused pass ([#1232](https://github.com/kunchenguid/no-mistakes/issues/1232)) ([ac8e342](https://github.com/kunchenguid/no-mistakes/commit/ac8e342c54b97a99936dddc238198db342b7b966))
+
+## [1.85.0](https://github.com/kunchenguid/no-mistakes/compare/v1.84.0...v1.85.0) (2026-09-27)
+
+
+### Features
+
+* **pipeline:** add configurable PR appendix modes ([#1228](https://github.com/kunchenguid/no-mistakes/issues/1228)) ([8635e4b](https://github.com/kunchenguid/no-mistakes/commit/8635e4b36e7bd0a1de2b9206ec741d485f7673ab))
+
 ## [1.84.0](https://github.com/kunchenguid/no-mistakes/compare/v1.83.2...v1.84.0) (2026-09-26)
 
 
