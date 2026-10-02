@@ -186,8 +186,8 @@ type GlobalConfig struct {
 	// session_reuse: false to force every invocation cold.
 	SessionReuse  bool          `yaml:"-"`
 	ForgeProfiles ForgeProfiles `yaml:"forge_profiles"`
-	// RepositoryOverrides scopes machine-local commit and PR-title formats to
-	// canonicalized remote host/owner/repository identities.
+	// RepositoryOverrides scopes machine-local settings to canonicalized
+	// remote host/owner/repository identities.
 	RepositoryOverrides RepositoryOverrides `yaml:"repository_overrides"`
 	AutoFix             AutoFixRaw
 	// CI is the operator's own CI-step floor. It is the only place the rerun
@@ -268,8 +268,9 @@ type ForgeProfiles map[string]ForgeProfile
 
 // RepositoryOverride contains machine-local settings for one normalized remote.
 type RepositoryOverride struct {
-	Commit GlobalCommitRaw `yaml:"commit"`
-	PR     RepositoryPRRaw `yaml:"pr"`
+	Commit   GlobalCommitRaw            `yaml:"commit"`
+	PR       RepositoryPRRaw            `yaml:"pr"`
+	Commands map[string]CommandOverride `yaml:"commands"`
 }
 
 // RepositoryPRRaw contains machine-local per-repository PR title settings.
@@ -708,6 +709,7 @@ type Config struct {
 	SessionReuse          bool
 	Eval                  Eval
 	Commands              Commands
+	CommandOverrides      map[string]CommandOverride
 	// Gates are the repository's extra checks, already trusted-only by the
 	// time they reach here (EffectiveRepoConfig sourced them from the trusted
 	// default-branch copy).
@@ -896,6 +898,13 @@ type TestRaw struct {
 	// repair turns. Repository-only and trusted-only regardless of
 	// allow_repo_commands; a pushed branch cannot authorize this trigger.
 	Prepare bool `yaml:"prepare"`
+	// BaseAttribution re-runs a failing commands.test on the run's base commit
+	// and reports which failures the change introduced and which already
+	// fail without it. Repository-only and trusted-only regardless of
+	// allow_repo_commands: it spends a second suite run and executes
+	// commands.prepare and commands.test on another checkout, so a pushed
+	// branch cannot authorize it.
+	BaseAttribution bool `yaml:"base_attribution"`
 	// Instructions is the repository's live-validation runbook: how to stand
 	// the product up in an isolated environment so the test step can drive
 	// end-user scenarios against the real thing. It is injected into the test
@@ -948,11 +957,12 @@ type EvidenceRaw struct {
 	MaxRuns   *int    `yaml:"max_runs"`
 }
 
-// Test is the resolved test-step config. Prepare, Instructions and
-// AllowApproveOverFailure come from the trusted default-branch repo config
-// only (see TestRaw).
+// Test is the resolved test-step config. Prepare, BaseAttribution,
+// Instructions and AllowApproveOverFailure come from the trusted
+// default-branch repo config only (see TestRaw).
 type Test struct {
 	Prepare                 bool
+	BaseAttribution         bool
 	Evidence                Evidence
 	Instructions            string
 	AllowApproveOverFailure string
@@ -2648,10 +2658,11 @@ func validatePathInstructionGlob(pattern string) error {
 // since they cannot run arbitrary shell, select a process, or spend the
 // maintainer's CI minutes.
 // The exceptions inside test are prepare, which eagerly runs setup before an
-// agent-only Test, evidence.branch, which names a git ref the daemon pushes to,
-// instructions, which steers the gate that validates the pushed branch, and
-// allow_approve_over_failure, which waives the required check for an
-// approved-over-failure commands.test. All four are trusted-only.
+// agent-only Test, base_attribution, which re-runs a failing commands.test on
+// the base commit, evidence.branch, which names a git ref the daemon pushes
+// to, instructions, which steers the gate that validates the pushed branch,
+// and allow_approve_over_failure, which waives the required check for an
+// approved-over-failure commands.test. All five are trusted-only.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
 	if pushed == nil {
 		pushed = &RepoConfig{}
@@ -2723,6 +2734,9 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// The eager setup trigger is trusted-only even when executable command
 		// values may come from the pushed branch.
 		effective.Test.Prepare = trusted.Test.Prepare
+		// Base attribution spends a second suite run and executes commands on
+		// another checkout, so it is trusted-only like the prepare trigger.
+		effective.Test.BaseAttribution = trusted.Test.BaseAttribution
 		// test.allow_approve_over_failure opts the required check into
 		// accepting a Test step approved over a failing commands.test. It is
 		// trusted-only for the same reason no_ci is: a pushed branch must not
@@ -2753,6 +2767,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Test.Evidence.Branch = nil
 		effective.Test.Instructions = ""
 		effective.Test.Prepare = false
+		effective.Test.BaseAttribution = false
 		effective.Test.AllowApproveOverFailure = ""
 		if !allowRepoCommands {
 			effective.PR.BaseBranch = ""
@@ -3122,8 +3137,9 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	return merge(global, repo, nil)
 }
 
-// MergeForRemote combines global and per-repo config, applying a matching
-// machine-local repository override between the global defaults and repo config.
+// MergeForRemote combines global and per-repo config. Matching machine-local
+// formats sit between global defaults and repo formats; command execution
+// settings supplement the repository commands without replacing them.
 func MergeForRemote(global *GlobalConfig, repo *RepoConfig, remote string) *Config {
 	var override *RepositoryOverride
 	if global != nil {
@@ -3172,6 +3188,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	// to describe. repo here is the EffectiveRepoConfig result, so this value
 	// is already trusted-only.
 	test.Prepare = repo.Test.Prepare
+	test.BaseAttribution = repo.Test.BaseAttribution
 	test.Instructions = strings.TrimSpace(repo.Test.Instructions)
 	test.AllowApproveOverFailure = strings.TrimSpace(repo.Test.AllowApproveOverFailure)
 
@@ -3270,6 +3287,10 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		// trusted-only (EffectiveRepoConfig sourced it from the trusted copy).
 		DisableProjectSettings: repo.DisableProjectSettings,
 		NoCI:                   repo.NoCI,
+	}
+
+	if override != nil {
+		cfg.CommandOverrides = copyCommandOverrides(override.Commands)
 	}
 
 	if repo.Agent != "" {
