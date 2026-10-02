@@ -22,7 +22,7 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 	if err != nil {
 		return fmt.Errorf("check protected_paths and scratch: %w", err)
 	}
-	var changed, unstage, deleted []string
+	var changed, unstage, deleted, excludedFiles []string
 	scratch := newScratchExclusions()
 	for _, entry := range strings.Split(strings.TrimSuffix(status, "\x00"), "\x00") {
 		if entry == "" {
@@ -41,6 +41,9 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 			if entry[:2] != "??" {
 				unstage = append(unstage, file)
 			}
+			if entry[1] != 'D' && !strings.HasSuffix(file, "/") {
+				excludedFiles = append(excludedFiles, file)
+			}
 			continue
 		}
 		changed = append(changed, file)
@@ -48,17 +51,17 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 			deleted = append(deleted, file)
 		}
 	}
-	// A new scratch path may be the destination of a tracked move, including
-	// an unstaged or heavily edited move that rename detection cannot identify.
-	// Defer deletions whenever we exclude new scratch, preserving both sides
-	// in the worktree and the original content in HEAD instead of committing
-	// only the deletion. Unrelated deletions are conservatively deferred too.
-	if len(scratch.order) > 0 && len(deleted) > 0 {
+	// A tracked deletion whose committed content now lives at an excluded new
+	// scratch path is a move into scratch; defer it so the move is staged
+	// whole or not at all. Every other deletion is staged normally.
+	deleted, err = movedIntoScratch(sctx, deleted, excludedFiles)
+	if err != nil {
+		return fmt.Errorf("check moves into scratch: %w", err)
+	}
+	if len(deleted) > 0 {
 		if _, err := stepGitRunInput(sctx, nulPathspecs(literalPathspecs(deleted)), "reset", "-q", "HEAD", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
-			return fmt.Errorf("unstage possible scratch move sources: %w", err)
+			return fmt.Errorf("unstage scratch move sources: %w", err)
 		}
-	} else {
-		deleted = nil
 	}
 	if len(unstage) > 0 {
 		if _, err := stepGitRunInput(sctx, nulPathspecs(literalPathspecs(unstage)), "rm", "--cached", "-f", "-q", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
@@ -76,9 +79,49 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 		sctx.Log("left new tool caches and scratch out of the commit (still in the run worktree): " + summary)
 	}
 	if len(deleted) > 0 {
-		sctx.Log("left tracked deletions out of the commit (possible moves into excluded scratch; still in the run worktree): " + strings.Join(deleted, ", "))
+		sctx.Log("left tracked deletions out of the commit (moved into excluded scratch; still in the run worktree): " + strings.Join(deleted, ", "))
 	}
 	return unstageSubmodulePointerMoves(sctx)
+}
+
+// movedIntoScratch returns the deleted paths whose HEAD blob matches the
+// content of an excluded new scratch or cache file.
+func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([]string, error) {
+	if len(deleted) == 0 || len(excluded) == 0 {
+		return nil, nil
+	}
+	var hashable []string
+	for _, file := range excluded {
+		if !strings.Contains(file, "\n") {
+			hashable = append(hashable, file)
+		}
+	}
+	if len(hashable) == 0 {
+		return nil, nil
+	}
+	out, err := stepGitRunInput(sctx, strings.NewReader(strings.Join(hashable, "\n")+"\n"), "hash-object", "--stdin-paths")
+	if err != nil {
+		return nil, err
+	}
+	excludedBlobs := map[string]bool{}
+	for _, blob := range strings.Fields(out) {
+		excludedBlobs[blob] = true
+	}
+	tree, err := stepGitRunRaw(sctx, append([]string{"--literal-pathspecs", "ls-tree", "-z", "--full-tree", "HEAD", "--"}, deleted...)...)
+	if err != nil {
+		return nil, err
+	}
+	var moved []string
+	for _, entry := range strings.Split(strings.TrimSuffix(tree, "\x00"), "\x00") {
+		meta, file, ok := strings.Cut(entry, "\t")
+		if !ok {
+			continue
+		}
+		if fields := strings.Fields(meta); len(fields) == 3 && fields[1] == "blob" && excludedBlobs[fields[2]] {
+			moved = append(moved, file)
+		}
+	}
+	return moved, nil
 }
 
 func literalPathspecs(files []string) []string {

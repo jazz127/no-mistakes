@@ -725,11 +725,20 @@ func TestDocumentCommitDefersTrackedMovesIntoScratch(t *testing.T) {
 					if err != nil || !committed {
 						t.Fatalf("document commit: committed=%v err=%v", committed, err)
 					}
-					if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-only"); got != "doc.md" {
-						t.Fatalf("document commit staged half a move: %q", got)
-					}
-					if got := gitCmd(t, dir, "show", "HEAD:"+source); got != strings.TrimSpace(string(original)) {
-						t.Fatalf("committed source content = %q", got)
+					if edited {
+						if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-status"); got != "A\tdoc.md\nD\t"+source {
+							t.Fatalf("rewritten destination is not a move; deletion should be committed: %q", got)
+						}
+					} else {
+						if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-only"); got != "doc.md" {
+							t.Fatalf("document commit staged half a move: %q", got)
+						}
+						if got := gitCmd(t, dir, "show", "HEAD:"+source); got != strings.TrimSpace(string(original)) {
+							t.Fatalf("committed source content = %q", got)
+						}
+						if !strings.Contains(strings.Join(logs, "\n"), "left tracked deletions out of the commit") {
+							t.Fatalf("deferred deletion was not logged: %v", logs)
+						}
 					}
 					if got := gitCmd(t, dir, "ls-files", "--", destination); got != "" {
 						t.Fatalf("move destination remains in index: %q", got)
@@ -739,9 +748,6 @@ func TestDocumentCommitDefersTrackedMovesIntoScratch(t *testing.T) {
 					}
 					if _, err := os.Stat(filepath.Join(dir, source)); !os.IsNotExist(err) {
 						t.Fatalf("deleted source was restored in worktree: %v", err)
-					}
-					if !strings.Contains(strings.Join(logs, "\n"), "left tracked deletions out of the commit") {
-						t.Fatalf("deferred deletion was not logged: %v", logs)
 					}
 				})
 			}
@@ -761,6 +767,37 @@ func TestStagePipelineChanges_StagesTrackedDeletionWithoutNewScratch(t *testing.
 	}
 	if got := gitCmd(t, dir, "diff", "--cached", "--name-status"); got != "D\tfeature.txt" {
 		t.Fatalf("tracked deletion was not staged: %q", got)
+	}
+}
+
+func TestFixCommitStagesUnrelatedDeletionBesideScratchNotes(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	notes := filepath.Join(dir, "scratch", "notes.txt")
+	if err := os.MkdirAll(filepath.Dir(notes), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notes, []byte("temporary notes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "feature.txt")); err != nil {
+		t.Fatal(err)
+	}
+	var logs []string
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Log = func(line string) { logs = append(logs, line) }
+	committed, err := commitAgentFixesWithResult(sctx, types.StepReview, "remove legacy feature", "")
+	if err != nil || !committed {
+		t.Fatalf("fix commit: committed=%v err=%v", committed, err)
+	}
+	if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-status"); got != "D\tfeature.txt" {
+		t.Fatalf("unrelated deletion was not committed: %q", got)
+	}
+	if got := gitStatusPorcelain(t, dir); !strings.Contains(got, "?? scratch/") {
+		t.Fatalf("scratch notes are not left untracked: %q", got)
+	}
+	if joined := strings.Join(logs, "\n"); strings.Contains(joined, "left tracked deletions out of the commit") {
+		t.Fatalf("unrelated deletion was logged as deferred: %q", joined)
 	}
 }
 
