@@ -302,6 +302,8 @@ var migrationStatements = []string{
 	// unpublished head this run produced; a timestamp means an explicit
 	// guarded recovery ended that ownership (internal/branchsync).
 	`ALTER TABLE runs ADD COLUMN custody_returned_at INTEGER`,
+	// The exact published head whose custody was returned without moving Git.
+	`ALTER TABLE runs ADD COLUMN custody_returned_head_sha TEXT`,
 	// Proof bindings remain nullable for ordinary and historical rows. The
 	// partial unique index is the cross-process duplicate defense.
 	`ALTER TABLE runs ADD COLUMN launch_nonce TEXT`,

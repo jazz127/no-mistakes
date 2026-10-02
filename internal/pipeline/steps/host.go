@@ -71,7 +71,7 @@ func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, str
 			// the plain slug (without host prefix) is correct here.
 			forkRepo = github.RepoSlug(sctx.Repo.ForkURL)
 		}
-		draft := sctx.Config != nil && sctx.Config.Providers.GitHub.DraftPullRequests
+		draft := githubDraftPullRequestsEnabled(sctx)
 		return github.NewWithFork(cmdFactory, func() bool { return stepCLIAvailable(sctx, provider) }, host, repo, forkRepo, draft), ""
 	case scm.ProviderGitLab:
 		if sctx.Repo.ForkURL != "" {
@@ -170,6 +170,27 @@ func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, str
 	default:
 		return nil, fmt.Sprintf("provider %s is not supported yet", provider)
 	}
+}
+
+// githubDraftPullRequestsEnabled resolves the upstream-only mode from the
+// destination and configured fork owners. Unknown owner information fails
+// closed to the existing non-draft behavior.
+func githubDraftPullRequestsEnabled(sctx *pipeline.StepContext) bool {
+	if sctx.Config == nil {
+		return false
+	}
+	settings := sctx.Config.Providers.GitHub
+	if settings.DraftPullRequests {
+		return true
+	}
+	if !settings.DraftUpstreamPullRequests || strings.TrimSpace(sctx.Repo.ForkURL) == "" {
+		return false
+	}
+	baseSlug := github.RepoSlug(sctx.Repo.UpstreamURL)
+	headSlug := github.RepoSlug(sctx.Repo.ForkURL)
+	baseOwner, _, baseOK := strings.Cut(baseSlug, "/")
+	headOwner, _, headOK := strings.Cut(headSlug, "/")
+	return baseOK && headOK && baseOwner != "" && headOwner != "" && !strings.EqualFold(baseOwner, headOwner)
 }
 
 // BuildHostForTest exposes buildHost to tests in other packages.
