@@ -3,8 +3,10 @@ package steps
 import (
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -41,9 +43,7 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 			if entry[:2] != "??" {
 				unstage = append(unstage, file)
 			}
-			if entry[1] != 'D' && !strings.HasSuffix(file, "/") {
-				excludedFiles = append(excludedFiles, file)
-			}
+			excludedFiles = append(excludedFiles, file)
 			continue
 		}
 		changed = append(changed, file)
@@ -85,39 +85,75 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 }
 
 // movedIntoScratch returns the deleted paths whose HEAD blob matches the
-// content of an excluded new scratch or cache file.
+// content of an excluded new scratch or cache file. Only excluded regular
+// files and symlinks whose size matches a deleted blob of the same kind are
+// hashed; symlinks are hashed by target, never followed.
 func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([]string, error) {
 	if len(deleted) == 0 || len(excluded) == 0 {
 		return nil, nil
 	}
-	var hashable []string
-	for _, file := range excluded {
-		if !strings.Contains(file, "\n") {
-			hashable = append(hashable, file)
-		}
+	type blobKind struct {
+		size int64
+		link bool
 	}
-	if len(hashable) == 0 {
-		return nil, nil
-	}
-	out, err := stepGitRunInput(sctx, strings.NewReader(strings.Join(hashable, "\n")+"\n"), "hash-object", "--stdin-paths")
+	tree, err := stepGitRunRaw(sctx, append([]string{"--literal-pathspecs", "ls-tree", "-z", "-l", "--full-tree", "HEAD", "--"}, deleted...)...)
 	if err != nil {
 		return nil, err
 	}
-	excludedBlobs := map[string]bool{}
-	for _, blob := range strings.Fields(out) {
-		excludedBlobs[blob] = true
-	}
-	tree, err := stepGitRunRaw(sctx, append([]string{"--literal-pathspecs", "ls-tree", "-z", "--full-tree", "HEAD", "--"}, deleted...)...)
-	if err != nil {
-		return nil, err
-	}
-	var moved []string
+	headBlobs := map[string]string{}
+	kinds := map[blobKind]bool{}
 	for _, entry := range strings.Split(strings.TrimSuffix(tree, "\x00"), "\x00") {
 		meta, file, ok := strings.Cut(entry, "\t")
-		if !ok {
+		fields := strings.Fields(meta)
+		if !ok || len(fields) != 4 || fields[1] != "blob" {
 			continue
 		}
-		if fields := strings.Fields(meta); len(fields) == 3 && fields[1] == "blob" && excludedBlobs[fields[2]] {
+		size, err := strconv.ParseInt(fields[3], 10, 64)
+		if err != nil {
+			continue
+		}
+		headBlobs[file] = fields[2]
+		kinds[blobKind{size: size, link: fields[0] == "120000"}] = true
+	}
+	if len(kinds) == 0 {
+		return nil, nil
+	}
+	excludedBlobs := map[string]bool{}
+	var regular []string
+	for _, file := range excluded {
+		info, err := os.Lstat(filepath.Join(sctx.WorkDir, filepath.FromSlash(file)))
+		if err != nil {
+			continue
+		}
+		switch {
+		case info.Mode().IsRegular():
+			if kinds[blobKind{size: info.Size()}] && !strings.Contains(file, "\n") {
+				regular = append(regular, file)
+			}
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(filepath.Join(sctx.WorkDir, filepath.FromSlash(file)))
+			if err != nil || !kinds[blobKind{size: int64(len(target)), link: true}] {
+				continue
+			}
+			blob, err := stepGitRunInput(sctx, strings.NewReader(target), "hash-object", "--stdin")
+			if err != nil {
+				return nil, err
+			}
+			excludedBlobs[strings.TrimSpace(blob)] = true
+		}
+	}
+	if len(regular) > 0 {
+		out, err := stepGitRunInput(sctx, strings.NewReader(strings.Join(regular, "\n")+"\n"), "hash-object", "--stdin-paths")
+		if err != nil {
+			return nil, err
+		}
+		for _, blob := range strings.Fields(out) {
+			excludedBlobs[blob] = true
+		}
+	}
+	var moved []string
+	for _, file := range deleted {
+		if blob, ok := headBlobs[file]; ok && excludedBlobs[blob] {
 			moved = append(moved, file)
 		}
 	}

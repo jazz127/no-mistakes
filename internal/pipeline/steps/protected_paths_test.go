@@ -801,6 +801,63 @@ func TestFixCommitStagesUnrelatedDeletionBesideScratchNotes(t *testing.T) {
 	}
 }
 
+func TestFixCommitStagesUnrelatedDeletionBesideCacheSymlinks(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	store := filepath.Join(dir, "node_modules", ".pnpm", "pkg@1.0.0")
+	if err := os.MkdirAll(store, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "index.js"), []byte("module.exports = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(".pnpm", "pkg@1.0.0"), filepath.Join(dir, "node_modules", "pkg")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing-target", filepath.Join(dir, "node_modules", "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "feature.txt")); err != nil {
+		t.Fatal(err)
+	}
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	committed, err := commitAgentFixesWithResult(sctx, types.StepReview, "remove legacy feature", "")
+	if err != nil || !committed {
+		t.Fatalf("fix commit: committed=%v err=%v", committed, err)
+	}
+	if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-status"); got != "D\tfeature.txt" {
+		t.Fatalf("unrelated deletion was not committed alone: %q", got)
+	}
+}
+
+func TestDocumentCommitDefersTrackedSymlinkMoveIntoScratch(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := setupGitRepo(t)
+	if err := os.Symlink("feature.txt", filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "link")
+	gitCmd(t, dir, "commit", "-m", "add link")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	if err := os.MkdirAll(filepath.Join(dir, "scratch"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(dir, "link"), filepath.Join(dir, "scratch", "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "doc.md"), []byte("document output\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	committed, err := commitAgentFixesWithResult(sctx, types.StepDocument, "update docs", "")
+	if err != nil || !committed {
+		t.Fatalf("document commit: committed=%v err=%v", committed, err)
+	}
+	if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-only"); got != "doc.md" {
+		t.Fatalf("document commit staged half a symlink move: %q", got)
+	}
+}
+
 func TestStagePipelineChanges_LeavesUntrackedScratchAndCachesOut(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
