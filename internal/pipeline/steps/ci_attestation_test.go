@@ -947,3 +947,21 @@ func TestPushStep_SkipsGhOnBaseBranch(t *testing.T) {
 		t.Fatalf("expected no gh invocation at all for a direct push to the base branch:\n%s", logData)
 	}
 }
+
+func TestLegacyCompletedGoKeepsLifecycleButPublishesConservatively(t *testing.T) {
+	t.Parallel()
+	findings := `{"findings":[],"summary":"","tested":["go test ./..."],"testing_summary":"legacy","scenarios":[{"name":"legacy scenario","result":"pass","live":true,"evidence":"output"}],"verdict":"go","tested_head_sha":"` + testPipelineHeadSHA + `"}`
+	step := &db.StepResult{
+		ID:           "test",
+		StepName:     types.StepTest,
+		Status:       types.StepStatusCompleted,
+		FindingsJSON: &findings,
+	}
+	if got := step.TestOverrideReason(); got != "" {
+		t.Fatalf("legacy clean Test reported an exception nobody approved: %q", got)
+	}
+	got := parsePipelineAttestationForTest(t, buildPipelineAttestation([]*db.StepResult{step}, nil, testPipelineHeadSHA)).LiveValidation
+	if got == nil || got.Verdict != types.TestVerdictInconclusive || got.Live != 0 || got.Total != 1 {
+		t.Fatalf("live validation = %+v, want inconclusive 0 of 1", got)
+	}
+}

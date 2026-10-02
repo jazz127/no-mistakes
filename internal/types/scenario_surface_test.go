@@ -18,7 +18,7 @@ func TestLiveScenarioCounts_RequiresProductSurface(t *testing.T) {
 	}
 }
 
-func TestParseFindingsJSON_SurfaceProvenanceSurvivesRoundTrip(t *testing.T) {
+func TestParseFindingsJSON_PreservesRecordedVerdictAndSurface(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name, surface, wantVerdict string
@@ -31,10 +31,8 @@ func TestParseFindingsJSON_SurfaceProvenanceSurvivesRoundTrip(t *testing.T) {
 		{"unknown provenance", "other", TestVerdictInconclusive, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw, err := MarshalFindingsJSON(Findings{
-				Scenarios: []TestScenario{{Name: "operation", Result: ScenarioResultPass, Live: true, Surface: tc.surface, Evidence: "captured output"}},
-				Verdict:   TestVerdictGo,
-			})
+			recorded := TestScenario{Name: "operation", Result: ScenarioResultPass, Live: true, Surface: tc.surface, Evidence: "captured output"}
+			raw, err := MarshalFindingsJSON(Findings{Scenarios: []TestScenario{recorded}, Verdict: TestVerdictGo})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -42,19 +40,14 @@ func TestParseFindingsJSON_SurfaceProvenanceSurvivesRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if parsed.Verdict != tc.wantVerdict || parsed.Scenarios[0].Live != tc.wantLive || parsed.Scenarios[0].Surface != tc.surface {
-				t.Fatalf("parsed = %+v, want verdict %s live %t surface %q", parsed, tc.wantVerdict, tc.wantLive, tc.surface)
+			if parsed.Verdict != TestVerdictGo || parsed.Scenarios[0] != recorded {
+				t.Fatalf("parsed = %+v, want the recorded go verdict and scenario unchanged", parsed)
 			}
-			rewritten, err := MarshalFindingsJSON(FindingsMetadata(parsed))
-			if err != nil {
-				t.Fatal(err)
+			if got := LiveValidationVerdict(parsed.Scenarios, parsed.Verdict); got != tc.wantVerdict {
+				t.Fatalf("live validation verdict = %q, want %q", got, tc.wantVerdict)
 			}
-			again, err := ParseFindingsJSON(rewritten)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if again.Verdict != parsed.Verdict || again.Scenarios[0] != parsed.Scenarios[0] {
-				t.Fatalf("rewrite changed provenance: %+v", again)
+			if got := parsed.Scenarios[0].IsLive(); got != tc.wantLive {
+				t.Fatalf("IsLive = %t, want %t", got, tc.wantLive)
 			}
 		})
 	}

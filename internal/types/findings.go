@@ -391,10 +391,6 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 	if len(items) == 0 && len(wire.Legacy) > 0 {
 		items = wire.Legacy
 	}
-	verdict := LiveValidationVerdict(wire.Scenarios, wire.Verdict)
-	for i := range wire.Scenarios {
-		wire.Scenarios[i].Live = wire.Scenarios[i].IsLive()
-	}
 	return Findings{
 		Items:               items,
 		Summary:             wire.Summary,
@@ -404,7 +400,7 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		TestingSummary:      wire.TestingSummary,
 		Artifacts:           wire.Artifacts,
 		Scenarios:           wire.Scenarios,
-		Verdict:             verdict,
+		Verdict:             wire.Verdict,
 		TestedHeadSHA:       wire.TestedHeadSHA,
 		UnvalidatedSinceSHA: wire.UnvalidatedSinceSHA,
 		RiskLevel:           wire.RiskLevel,

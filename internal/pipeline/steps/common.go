@@ -150,6 +150,7 @@ func unmarshalRequiredTestFindings(raw []byte, findings *Findings) error {
 	if len(issues) > 0 {
 		return fmt.Errorf("%s", strings.Join(issues, "\n"))
 	}
+	findings.Verdict = types.LiveValidationVerdict(findings.Scenarios, findings.Verdict)
 	return nil
 }
 

@@ -248,7 +248,7 @@ func attestedLiveValidation(steps []*db.StepResult, rounds map[string][]*db.Step
 			}
 			live, total := types.LiveScenarioCounts(findings.Scenarios)
 			return &pipelineAttestationLiveValidation{
-				Verdict: findings.Verdict,
+				Verdict: types.LiveValidationVerdict(findings.Scenarios, findings.Verdict),
 				Live:    live,
 				Total:   total,
 			}
