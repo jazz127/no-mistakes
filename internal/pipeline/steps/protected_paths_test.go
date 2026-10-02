@@ -861,6 +861,64 @@ func TestDocumentCommitDefersCRLFMoveIntoScratch(t *testing.T) {
 	}
 }
 
+func TestFixCommitStagesEmptyFileDeletionBesideEmptyScratch(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitkeep"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", ".gitkeep")
+	gitCmd(t, dir, "commit", "-m", "add gitkeep")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	if err := os.MkdirAll(filepath.Join(dir, "scratch"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "scratch", "todo"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, ".gitkeep")); err != nil {
+		t.Fatal(err)
+	}
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	committed, err := commitAgentFixesWithResult(sctx, types.StepReview, "remove gitkeep", "")
+	if err != nil || !committed {
+		t.Fatalf("fix commit: committed=%v err=%v", committed, err)
+	}
+	if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-status"); got != "D\t.gitkeep" {
+		t.Fatalf("empty file deletion was not committed: %q", got)
+	}
+}
+
+func TestDocumentCommitDefersMoveIntoUnusuallyNamedScratch(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"scratch/\"draft", "scratch/cr\r", "scratch/nl\nname", "scratch/-dash"} {
+		t.Run(strconv.Quote(name), func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			if err := os.MkdirAll(filepath.Join(dir, "scratch"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "scratch", "other"), []byte("unrelated\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(filepath.Join(dir, "feature.txt"), filepath.Join(dir, filepath.FromSlash(name))); err != nil {
+				t.Skipf("platform does not support %q: %v", name, err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "doc.md"), []byte("document output\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+			committed, err := commitAgentFixesWithResult(sctx, types.StepDocument, "update docs", "")
+			if err != nil || !committed {
+				t.Fatalf("document commit: committed=%v err=%v", committed, err)
+			}
+			if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-only"); got != "doc.md" {
+				t.Fatalf("document commit staged half a move: %q", got)
+			}
+		})
+	}
+}
+
 func TestDocumentCommitDefersTrackedSymlinkMoveIntoScratch(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, _ := setupGitRepo(t)

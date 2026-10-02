@@ -88,6 +88,7 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 // content of an excluded new scratch or cache file. Only excluded regular
 // files and symlinks are hashed, regular files with the same clean and EOL
 // conversion as the HEAD blob; symlinks are hashed by target, never followed.
+// An empty HEAD blob holds no content to lose and is never a move.
 func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([]string, error) {
 	if len(deleted) == 0 || len(excluded) == 0 {
 		return nil, nil
@@ -105,11 +106,11 @@ func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([
 		if !ok || len(fields) != 4 || fields[1] != "blob" {
 			continue
 		}
+		size, err := strconv.ParseInt(fields[3], 10, 64)
+		if err != nil || size == 0 {
+			continue
+		}
 		if fields[0] == "120000" {
-			size, err := strconv.ParseInt(fields[3], 10, 64)
-			if err != nil {
-				continue
-			}
 			linkSizes[size] = true
 		} else {
 			hasRegular = true
@@ -128,7 +129,7 @@ func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([
 		}
 		switch {
 		case info.Mode().IsRegular():
-			if hasRegular && !strings.Contains(file, "\n") {
+			if hasRegular {
 				regular = append(regular, file)
 			}
 		case info.Mode()&os.ModeSymlink != 0:
@@ -143,8 +144,9 @@ func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([
 			excludedBlobs[strings.TrimSpace(blob)] = true
 		}
 	}
-	if len(regular) > 0 {
-		out, err := stepGitRunInput(sctx, strings.NewReader(strings.Join(regular, "\n")+"\n"), "hash-object", "--stdin-paths")
+	const hashBatch = 256
+	for start := 0; start < len(regular); start += hashBatch {
+		out, err := stepGitRun(sctx, append([]string{"hash-object", "--"}, regular[start:min(start+hashBatch, len(regular))]...)...)
 		if err != nil {
 			return nil, err
 		}
