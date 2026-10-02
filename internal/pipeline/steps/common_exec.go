@@ -196,17 +196,7 @@ func stepGitRun(sctx *pipeline.StepContext, args ...string) (string, error) {
 
 // stepGitRunRaw preserves NUL-delimited paths and porcelain status columns.
 func stepGitRunRaw(sctx *pipeline.StepContext, args ...string) (string, error) {
-	cmd := stepCmd(sctx, "git", args...)
-	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
-	out, err := cmd.Output()
-	if err != nil {
-		stderr := ""
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(ee.Stderr))
-		}
-		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
-	}
-	return string(out), nil
+	return stepGitRunInput(sctx, nil, args...)
 }
 
 func stepGitRunInput(sctx *pipeline.StepContext, input io.Reader, args ...string) (string, error) {
