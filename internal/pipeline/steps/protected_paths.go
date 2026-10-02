@@ -3,10 +3,8 @@ package steps
 import (
 	"fmt"
 	"io"
-	"os"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -16,17 +14,18 @@ import (
 // including Push's leftover commit. Refusal preserves the index and worktree.
 // New tool caches and scratch files stay in the run worktree but out of commits.
 func stagePipelineChanges(sctx *pipeline.StepContext) error {
-	// Disable renames so both source and destination are checked, and list
-	// individual untracked files so protected paths and caches inside a new
-	// directory cannot hide behind the directory entry. NULs preserve unusual
-	// names.
-	status, err := stepGitRunRaw(sctx, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--ignore-submodules=none")
+	// List individual untracked files so protected paths cannot hide behind
+	// a directory entry. Renames carry the destination, then the source, as
+	// separate NUL-delimited paths; both must be checked and staged together.
+	status, err := stepGitRunRaw(sctx, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--renames", "--ignore-submodules=none")
 	if err != nil {
 		return fmt.Errorf("check protected_paths and scratch: %w", err)
 	}
-	var changed, unstage, deleted, excludedFiles []string
+	var changed, unstage []string
 	scratch := newScratchExclusions()
-	for _, entry := range strings.Split(strings.TrimSuffix(status, "\x00"), "\x00") {
+	entries := strings.Split(strings.TrimSuffix(status, "\x00"), "\x00")
+	for i := 0; i < len(entries); i++ {
+		entry := entries[i]
 		if entry == "" {
 			continue
 		}
@@ -34,34 +33,28 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 			return fmt.Errorf("check protected_paths and scratch: invalid git status entry %q", entry)
 		}
 		file := entry[3:]
-		for _, pattern := range sctx.Config.ProtectedPaths {
-			if matchIgnorePattern(file, pattern) {
-				return &pipeline.ProtectedPathError{Path: file, Rule: pattern}
+		files := []string{file}
+		if strings.ContainsAny(entry[:2], "RC") {
+			i++
+			if i >= len(entries) || entries[i] == "" {
+				return fmt.Errorf("check protected_paths and scratch: missing source for %q", entry)
+			}
+			files = append(files, entries[i])
+		}
+		for _, changedPath := range files {
+			for _, pattern := range sctx.Config.ProtectedPaths {
+				if matchIgnorePattern(changedPath, pattern) {
+					return &pipeline.ProtectedPathError{Path: changedPath, Rule: pattern}
+				}
 			}
 		}
-		if (entry[:2] == "??" || entry[0] == 'A' || entry[1] == 'A') && scratch.add(file) {
+		if len(files) == 1 && (entry[:2] == "??" || entry[0] == 'A' || entry[1] == 'A') && scratch.add(file) {
 			if entry[:2] != "??" {
 				unstage = append(unstage, file)
 			}
-			excludedFiles = append(excludedFiles, file)
 			continue
 		}
-		changed = append(changed, file)
-		if entry[0] == 'D' || (entry[1] == 'D' && entry[0] != 'A') {
-			deleted = append(deleted, file)
-		}
-	}
-	// A tracked deletion whose committed content now lives at an excluded new
-	// scratch path is a move into scratch; defer it so the move is staged
-	// whole or not at all. Every other deletion is staged normally.
-	deleted, err = movedIntoScratch(sctx, deleted, excludedFiles)
-	if err != nil {
-		return fmt.Errorf("check moves into scratch: %w", err)
-	}
-	if len(deleted) > 0 {
-		if _, err := stepGitRunInput(sctx, nulPathspecs(literalPathspecs(deleted)), "reset", "-q", "HEAD", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
-			return fmt.Errorf("unstage scratch move sources: %w", err)
-		}
+		changed = append(changed, files...)
 	}
 	if len(unstage) > 0 {
 		if _, err := stepGitRunInput(sctx, nulPathspecs(literalPathspecs(unstage)), "rm", "--cached", "-f", "-q", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
@@ -69,120 +62,13 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 		}
 	}
 	specs := append([]string{"."}, scratch.pathspecs(changed)...)
-	for _, file := range deleted {
-		specs = append(specs, ":(exclude,literal)"+file)
-	}
 	if _, err := stepGitRunInput(sctx, nulPathspecs(specs), "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
 		return err
 	}
 	if summary := scratch.summary(); summary != "" {
 		sctx.Log("left new tool caches and scratch out of the commit (still in the run worktree): " + summary)
 	}
-	if len(deleted) > 0 {
-		sctx.Log("left tracked deletions out of the commit (moved into excluded scratch; still in the run worktree): " + strings.Join(deleted, ", "))
-	}
 	return unstageSubmodulePointerMoves(sctx)
-}
-
-// movedIntoScratch returns the deleted paths whose HEAD blob matches the
-// content of an excluded new scratch or cache file. Only excluded regular
-// files and symlinks are hashed, regular files with the same clean and EOL
-// conversion as the HEAD blob; symlinks are hashed by target, never followed.
-// An empty HEAD blob holds no content to lose and is never a move.
-func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([]string, error) {
-	if len(deleted) == 0 || len(excluded) == 0 {
-		return nil, nil
-	}
-	var tree strings.Builder
-	for _, batch := range argvBatches(deleted) {
-		out, err := stepGitRunRaw(sctx, append([]string{"--literal-pathspecs", "ls-tree", "-z", "-l", "--full-tree", "HEAD", "--"}, batch...)...)
-		if err != nil {
-			return nil, err
-		}
-		tree.WriteString(out)
-	}
-	headBlobs := map[string]string{}
-	hasRegular := false
-	linkSizes := map[int64]bool{}
-	for _, entry := range strings.Split(strings.TrimSuffix(tree.String(), "\x00"), "\x00") {
-		meta, file, ok := strings.Cut(entry, "\t")
-		fields := strings.Fields(meta)
-		if !ok || len(fields) != 4 || fields[1] != "blob" {
-			continue
-		}
-		size, err := strconv.ParseInt(fields[3], 10, 64)
-		if err != nil || size == 0 {
-			continue
-		}
-		if fields[0] == "120000" {
-			linkSizes[size] = true
-		} else {
-			hasRegular = true
-		}
-		headBlobs[file] = fields[2]
-	}
-	if len(headBlobs) == 0 {
-		return nil, nil
-	}
-	excludedBlobs := map[string]bool{}
-	var regular []string
-	for _, file := range excluded {
-		info, err := os.Lstat(filepath.Join(sctx.WorkDir, filepath.FromSlash(file)))
-		if err != nil {
-			continue
-		}
-		switch {
-		case info.Mode().IsRegular():
-			if hasRegular {
-				regular = append(regular, file)
-			}
-		case info.Mode()&os.ModeSymlink != 0:
-			target, err := os.Readlink(filepath.Join(sctx.WorkDir, filepath.FromSlash(file)))
-			if err != nil || !linkSizes[int64(len(target))] {
-				continue
-			}
-			blob, err := stepGitRunInput(sctx, strings.NewReader(target), "hash-object", "--stdin")
-			if err != nil {
-				return nil, err
-			}
-			excludedBlobs[strings.TrimSpace(blob)] = true
-		}
-	}
-	for _, batch := range argvBatches(regular) {
-		out, err := stepGitRun(sctx, append([]string{"hash-object", "--"}, batch...)...)
-		if err != nil {
-			return nil, err
-		}
-		for _, blob := range strings.Fields(out) {
-			excludedBlobs[blob] = true
-		}
-	}
-	var moved []string
-	for _, file := range deleted {
-		if blob, ok := headBlobs[file]; ok && excludedBlobs[blob] {
-			moved = append(moved, file)
-		}
-	}
-	return moved, nil
-}
-
-// argvBatches splits paths into command-line batches small enough for
-// Windows' 32,767-character limit; a single overlong path runs alone.
-func argvBatches(paths []string) [][]string {
-	const maxCount, maxBytes = 256, 16 << 10
-	var batches [][]string
-	start, size := 0, 0
-	for i, file := range paths {
-		if i > start && (i-start == maxCount || size+len(file)+1 > maxBytes) {
-			batches = append(batches, paths[start:i])
-			start, size = i, 0
-		}
-		size += len(file) + 1
-	}
-	if start < len(paths) {
-		batches = append(batches, paths[start:])
-	}
-	return batches
 }
 
 func literalPathspecs(files []string) []string {

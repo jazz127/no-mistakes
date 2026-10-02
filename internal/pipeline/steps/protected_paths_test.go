@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -684,75 +682,56 @@ func TestDocumentCommitLeavesIntentToAddAndDoubleUnderscoreScratchOut(t *testing
 	}
 }
 
-func TestDocumentCommitDefersTrackedMovesIntoScratch(t *testing.T) {
+func TestDocumentCommitStagesGitRenamesIntoScratch(t *testing.T) {
 	t.Parallel()
-	for _, destination := range []string{"scratch/moved.txt", ".cache/moved.txt", "tests/__moved.sh"} {
-		for _, staging := range []string{"unstaged", "staged", "intent-to-add"} {
-			for _, edited := range []bool{false, true} {
-				t.Run(destination+"/"+staging+"/edited="+strconv.FormatBool(edited), func(t *testing.T) {
-					t.Parallel()
-					dir, baseSHA, headSHA := setupGitRepo(t)
-					const source = "feature.txt"
-					original, err := os.ReadFile(filepath.Join(dir, source))
-					if err != nil {
+	for _, destination := range []string{"scratch/moved ü.txt", ".cache/moved.txt", "tests/__moved.sh"} {
+		for _, staging := range []string{"staged", "intent-to-add"} {
+			t.Run(destination+"/"+staging, func(t *testing.T) {
+				t.Parallel()
+				dir, baseSHA, headSHA := setupGitRepo(t)
+				original, err := os.ReadFile(filepath.Join(dir, "feature.txt"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				fullPath := filepath.Join(dir, filepath.FromSlash(destination))
+				if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if staging == "staged" {
+					gitCmd(t, dir, "mv", "feature.txt", destination)
+				} else {
+					if err := os.Rename(filepath.Join(dir, "feature.txt"), fullPath); err != nil {
 						t.Fatal(err)
 					}
-					fullPath := filepath.Join(dir, filepath.FromSlash(destination))
-					if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+					gitCmd(t, dir, "add", "-N", "--", destination)
+				}
+				if status := gitCmd(t, dir, "status", "--porcelain=v1", "-z", "--renames"); !strings.Contains(status, destination+"\x00feature.txt\x00") {
+					t.Fatalf("fixture must be a Git-reported rename: %q", status)
+				}
+				for file, content := range map[string]string{"doc.md": "document output\n", "scratch/notes.txt": "temporary notes\n"} {
+					full := filepath.Join(dir, file)
+					if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 						t.Fatal(err)
 					}
-					if err := os.Rename(filepath.Join(dir, source), fullPath); err != nil {
+					if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
 						t.Fatal(err)
 					}
-					content := original
-					if edited {
-						content = []byte("entirely rewritten moved content\n")
-						if err := os.WriteFile(fullPath, content, 0o644); err != nil {
-							t.Fatal(err)
-						}
-					}
-					switch staging {
-					case "staged":
-						gitCmd(t, dir, "add", "-A")
-					case "intent-to-add":
-						gitCmd(t, dir, "add", "-N", "--", destination)
-					}
-					if err := os.WriteFile(filepath.Join(dir, "doc.md"), []byte("document output\n"), 0o644); err != nil {
-						t.Fatal(err)
-					}
-					var logs []string
-					sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
-					sctx.Log = func(line string) { logs = append(logs, line) }
-					committed, err := commitAgentFixesWithResult(sctx, types.StepDocument, "update docs", "")
-					if err != nil || !committed {
-						t.Fatalf("document commit: committed=%v err=%v", committed, err)
-					}
-					if edited {
-						if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-status"); got != "A\tdoc.md\nD\t"+source {
-							t.Fatalf("rewritten destination is not a move; deletion should be committed: %q", got)
-						}
-					} else {
-						if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-only"); got != "doc.md" {
-							t.Fatalf("document commit staged half a move: %q", got)
-						}
-						if got := gitCmd(t, dir, "show", "HEAD:"+source); got != strings.TrimSpace(string(original)) {
-							t.Fatalf("committed source content = %q", got)
-						}
-						if !strings.Contains(strings.Join(logs, "\n"), "left tracked deletions out of the commit") {
-							t.Fatalf("deferred deletion was not logged: %v", logs)
-						}
-					}
-					if got := gitCmd(t, dir, "ls-files", "--", destination); got != "" {
-						t.Fatalf("move destination remains in index: %q", got)
-					}
-					if got, err := os.ReadFile(fullPath); err != nil || string(got) != string(content) {
-						t.Fatalf("moved worktree content = %q, err=%v", got, err)
-					}
-					if _, err := os.Stat(filepath.Join(dir, source)); !os.IsNotExist(err) {
-						t.Fatalf("deleted source was restored in worktree: %v", err)
-					}
-				})
-			}
+				}
+				sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+				committed, err := commitAgentFixesWithResult(sctx, types.StepDocument, "update docs", "")
+				if err != nil || !committed {
+					t.Fatalf("document commit: committed=%v err=%v", committed, err)
+				}
+				if got := gitCmd(t, dir, "show", "HEAD:"+destination); got != strings.TrimSpace(string(original)) {
+					t.Fatalf("committed destination content = %q", got)
+				}
+				if got := gitCmd(t, dir, "ls-tree", "HEAD", "--", "feature.txt", "scratch/notes.txt"); got != "" {
+					t.Fatalf("source or unrelated scratch was committed: %q", got)
+				}
+				if got := gitCmd(t, dir, "show", "HEAD:doc.md"); got != "document output" {
+					t.Fatalf("document output = %q", got)
+				}
+			})
 		}
 	}
 }
@@ -779,15 +758,17 @@ func TestFixCommitStagesUnrelatedDeletionBesideScratchNotes(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(notes), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(notes, []byte("temporary notes\n"), 0o644); err != nil {
+	original, err := os.ReadFile(filepath.Join(dir, "feature.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notes, original, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(filepath.Join(dir, "feature.txt")); err != nil {
 		t.Fatal(err)
 	}
-	var logs []string
 	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Log = func(line string) { logs = append(logs, line) }
 	committed, err := commitAgentFixesWithResult(sctx, types.StepReview, "remove legacy feature", "")
 	if err != nil || !committed {
 		t.Fatalf("fix commit: committed=%v err=%v", committed, err)
@@ -797,69 +778,6 @@ func TestFixCommitStagesUnrelatedDeletionBesideScratchNotes(t *testing.T) {
 	}
 	if got := gitStatusPorcelain(t, dir); !strings.Contains(got, "?? scratch/") {
 		t.Fatalf("scratch notes are not left untracked: %q", got)
-	}
-	if joined := strings.Join(logs, "\n"); strings.Contains(joined, "left tracked deletions out of the commit") {
-		t.Fatalf("unrelated deletion was logged as deferred: %q", joined)
-	}
-}
-
-func TestFixCommitStagesUnrelatedDeletionBesideCacheSymlinks(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	store := filepath.Join(dir, "node_modules", ".pnpm", "pkg@1.0.0")
-	if err := os.MkdirAll(store, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(store, "index.js"), []byte("module.exports = 1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(".pnpm", "pkg@1.0.0"), filepath.Join(dir, "node_modules", "pkg")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("missing-target", filepath.Join(dir, "node_modules", "dangling")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(filepath.Join(dir, "feature.txt")); err != nil {
-		t.Fatal(err)
-	}
-	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
-	committed, err := commitAgentFixesWithResult(sctx, types.StepReview, "remove legacy feature", "")
-	if err != nil || !committed {
-		t.Fatalf("fix commit: committed=%v err=%v", committed, err)
-	}
-	if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-status"); got != "D\tfeature.txt" {
-		t.Fatalf("unrelated deletion was not committed alone: %q", got)
-	}
-}
-
-func TestDocumentCommitDefersCRLFMoveIntoScratch(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, _ := setupGitRepo(t)
-	if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("*.bat text eol=crlf\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "build.bat"), []byte("echo one\r\necho two\r\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, dir, "add", ".gitattributes", "build.bat")
-	gitCmd(t, dir, "commit", "-m", "add build script")
-	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-	if err := os.MkdirAll(filepath.Join(dir, "scratch"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(filepath.Join(dir, "build.bat"), filepath.Join(dir, "scratch", "build.bat")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "doc.md"), []byte("document output\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
-	committed, err := commitAgentFixesWithResult(sctx, types.StepDocument, "update docs", "")
-	if err != nil || !committed {
-		t.Fatalf("document commit: committed=%v err=%v", committed, err)
-	}
-	if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-only"); got != "doc.md" {
-		t.Fatalf("document commit staged half a CRLF move: %q", got)
 	}
 }
 
@@ -888,99 +806,6 @@ func TestFixCommitStagesEmptyFileDeletionBesideEmptyScratch(t *testing.T) {
 	}
 	if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-status"); got != "D\t.gitkeep" {
 		t.Fatalf("empty file deletion was not committed: %q", got)
-	}
-}
-
-func TestDocumentCommitDefersMoveIntoUnusuallyNamedScratch(t *testing.T) {
-	t.Parallel()
-	for _, name := range []string{"scratch/\"draft", "scratch/cr\r", "scratch/nl\nname", "scratch/-dash"} {
-		t.Run(strconv.Quote(name), func(t *testing.T) {
-			t.Parallel()
-			dir, baseSHA, headSHA := setupGitRepo(t)
-			if err := os.MkdirAll(filepath.Join(dir, "scratch"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(dir, "scratch", "other"), []byte("unrelated\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Rename(filepath.Join(dir, "feature.txt"), filepath.Join(dir, filepath.FromSlash(name))); err != nil {
-				t.Skipf("platform does not support %q: %v", name, err)
-			}
-			if err := os.WriteFile(filepath.Join(dir, "doc.md"), []byte("document output\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
-			committed, err := commitAgentFixesWithResult(sctx, types.StepDocument, "update docs", "")
-			if err != nil || !committed {
-				t.Fatalf("document commit: committed=%v err=%v", committed, err)
-			}
-			if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-only"); got != "doc.md" {
-				t.Fatalf("document commit staged half a move: %q", got)
-			}
-		})
-	}
-}
-
-func TestDocumentCommitDefersMoveBeyondTheFirstDeletionBatch(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, _ := setupGitRepo(t)
-	vendor := filepath.Join(dir, "vendor", strings.Repeat("v", 120))
-	if err := os.MkdirAll(vendor, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 300; i++ {
-		if err := os.WriteFile(filepath.Join(vendor, fmt.Sprintf("file%03d.txt", i)), []byte(fmt.Sprintf("vendored %d\n", i)), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	gitCmd(t, dir, "add", "vendor")
-	gitCmd(t, dir, "commit", "-m", "vendor")
-	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-	if err := os.MkdirAll(filepath.Join(dir, "scratch"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(filepath.Join(vendor, "file299.txt"), filepath.Join(dir, "scratch", "kept.txt")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(filepath.Join(dir, "vendor")); err != nil {
-		t.Fatal(err)
-	}
-	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
-	committed, err := commitAgentFixesWithResult(sctx, types.StepDocument, "drop vendor", "")
-	if err != nil || !committed {
-		t.Fatalf("document commit: committed=%v err=%v", committed, err)
-	}
-	deletedInCommit := strings.Split(gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-only"), "\n")
-	if len(deletedInCommit) != 299 || slices.ContainsFunc(deletedInCommit, func(f string) bool { return strings.HasSuffix(f, "file299.txt") }) {
-		t.Fatalf("commit staged %d deletions, want 299 without the moved file", len(deletedInCommit))
-	}
-}
-
-func TestDocumentCommitDefersTrackedSymlinkMoveIntoScratch(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, _ := setupGitRepo(t)
-	if err := os.Symlink("feature.txt", filepath.Join(dir, "link")); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, dir, "add", "link")
-	gitCmd(t, dir, "commit", "-m", "add link")
-	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-	if err := os.MkdirAll(filepath.Join(dir, "scratch"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(filepath.Join(dir, "link"), filepath.Join(dir, "scratch", "link")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "doc.md"), []byte("document output\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
-	committed, err := commitAgentFixesWithResult(sctx, types.StepDocument, "update docs", "")
-	if err != nil || !committed {
-		t.Fatalf("document commit: committed=%v err=%v", committed, err)
-	}
-	if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-only"); got != "doc.md" {
-		t.Fatalf("document commit staged half a symlink move: %q", got)
 	}
 }
 
@@ -1213,35 +1038,5 @@ func TestProtectedPaths_UnreadableStatusFailsClosed(t *testing.T) {
 	sctx.Config.ProtectedPaths = []string{"*.lock"}
 	if err := stagePipelineChanges(sctx); err == nil || !strings.Contains(err.Error(), "check protected_paths") {
 		t.Fatalf("unreadable git status did not fail closed: %v", err)
-	}
-}
-
-func TestArgvBatchesBoundCountAndLength(t *testing.T) {
-	long := "node_modules/.pnpm/" + strings.Repeat("p", 180)
-	var paths []string
-	for i := 0; i < 300; i++ {
-		paths = append(paths, long+strconv.Itoa(i))
-	}
-	huge := strings.Repeat("x", 40<<10)
-	paths = append(paths, huge, "a")
-	var flat []string
-	for _, batch := range argvBatches(paths) {
-		if len(batch) == 0 || len(batch) > 256 {
-			t.Fatalf("batch size %d", len(batch))
-		}
-		size := 0
-		for _, file := range batch {
-			size += len(file) + 1
-		}
-		if len(batch) > 1 && size > 16<<10 {
-			t.Fatalf("multi-path batch of %d bytes exceeds budget", size)
-		}
-		if slices.Contains(batch, huge) && len(batch) != 1 {
-			t.Fatalf("overlong path shares a batch of %d", len(batch))
-		}
-		flat = append(flat, batch...)
-	}
-	if !slices.Equal(flat, paths) {
-		t.Fatal("batches do not preserve every path in order")
 	}
 }
