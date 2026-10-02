@@ -97,12 +97,11 @@ func scratchRoot(file string) (root, reason string, ok bool) {
 	}
 	inCache := false
 	for i, part := range dirs {
-		if scratchCacheDirs[part] || part == "scratch" || (part == "corepack" && inCache) {
-			reason := "tool cache"
-			if part == "scratch" {
-				reason = "scratch directory"
-			}
-			return strings.Join(parts[:i+1], "/"), reason, true
+		if i == 0 && part == "scratch" {
+			return part, "scratch directory", true
+		}
+		if scratchCacheDirs[part] || (part == "corepack" && inCache) {
+			return strings.Join(parts[:i+1], "/"), "tool cache", true
 		}
 		inCache = inCache || part == "cache" || strings.HasPrefix(part, ".")
 	}

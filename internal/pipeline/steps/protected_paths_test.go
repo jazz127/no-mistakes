@@ -682,6 +682,32 @@ func TestStagePipelineChanges_LeavesUntrackedScratchAndCachesOut(t *testing.T) {
 	}
 }
 
+func TestStagePipelineChanges_StagesNewFileUnderNestedScratchPackage(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	fullPath := filepath.Join(dir, "internal", "scratch", "buffer.go")
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fullPath, []byte("package scratch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	committed, err := commitAgentFixesWithResult(sctx, types.StepReview, "fix review findings", "")
+	if err != nil {
+		t.Fatalf("commit agent fixes: %v", err)
+	}
+	if !committed {
+		t.Fatal("fix commit was not created")
+	}
+	if got := gitCmd(t, dir, "show", "HEAD:internal/scratch/buffer.go"); got != "package scratch" {
+		t.Fatalf("nested scratch package file in commit = %q", got)
+	}
+	if got := gitStatusPorcelain(t, dir); got != "" {
+		t.Fatalf("worktree not clean after commit: %q", got)
+	}
+}
+
 func TestStagePipelineChanges_StagesTrackedChangesBesideUntrackedCache(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, _ := setupGitRepo(t)
