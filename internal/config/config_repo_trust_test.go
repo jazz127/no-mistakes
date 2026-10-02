@@ -196,23 +196,27 @@ func TestEffectiveRepoConfig_NilPushedSafeDefaults(t *testing.T) {
 func TestEffectiveRepoConfig_ProvidersUsePushedValues(t *testing.T) {
 	truthy := true
 	falsy := false
+	githubTruthy := GitHubDraftPullRequestsAll
+	githubFalsy := GitHubDraftPullRequestsOff
 	for _, tc := range []struct {
-		name    string
-		pushed  *bool
-		trusted *bool
+		name          string
+		pushed        *bool
+		trusted       *bool
+		githubPushed  *GitHubDraftPullRequests
+		githubTrusted *GitHubDraftPullRequests
 	}{
-		{name: "enabled", pushed: &truthy, trusted: &falsy},
-		{name: "disabled", pushed: &falsy, trusted: &truthy},
+		{name: "enabled", pushed: &truthy, trusted: &falsy, githubPushed: &githubTruthy, githubTrusted: &githubFalsy},
+		{name: "disabled", pushed: &falsy, trusted: &truthy, githubPushed: &githubFalsy, githubTrusted: &githubTruthy},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pushed := &RepoConfig{Providers: ProvidersRaw{
-				GitHub:      GitHubProviderRaw{DraftPullRequests: tc.pushed},
+				GitHub:      GitHubProviderRaw{DraftPullRequests: tc.githubPushed},
 				GitLab:      GitLabProviderRaw{DraftPullRequests: tc.pushed},
 				Bitbucket:   BitbucketProviderRaw{DraftPullRequests: tc.pushed},
 				AzureDevOps: AzureDevOpsProviderRaw{DraftPullRequests: tc.pushed},
 			}}
 			trusted := &RepoConfig{Providers: ProvidersRaw{
-				GitHub:      GitHubProviderRaw{DraftPullRequests: tc.trusted},
+				GitHub:      GitHubProviderRaw{DraftPullRequests: tc.githubTrusted},
 				GitLab:      GitLabProviderRaw{DraftPullRequests: tc.trusted},
 				Bitbucket:   BitbucketProviderRaw{DraftPullRequests: tc.trusted},
 				AzureDevOps: AzureDevOpsProviderRaw{DraftPullRequests: tc.trusted},
@@ -220,8 +224,10 @@ func TestEffectiveRepoConfig_ProvidersUsePushedValues(t *testing.T) {
 
 			for _, allowRepoCommands := range []bool{false, true} {
 				got := EffectiveRepoConfig(pushed, trusted, allowRepoCommands)
+				githubDraft := got.Providers.GitHub.DraftPullRequests
+				githubEnabled := githubDraft != nil && *githubDraft == GitHubDraftPullRequestsAll
 				providers := map[string]*bool{
-					"github":      got.Providers.GitHub.DraftPullRequests,
+					"github":      boolPtr(githubEnabled),
 					"gitlab":      got.Providers.GitLab.DraftPullRequests,
 					"bitbucket":   got.Providers.Bitbucket.DraftPullRequests,
 					"azuredevops": got.Providers.AzureDevOps.DraftPullRequests,
@@ -230,6 +236,9 @@ func TestEffectiveRepoConfig_ProvidersUsePushedValues(t *testing.T) {
 					if draft == nil || *draft != *tc.pushed {
 						t.Errorf("allowRepoCommands=%v: providers.%s.draft_pull_requests = %v, want pushed %v", allowRepoCommands, provider, draft, *tc.pushed)
 					}
+				}
+				if got.Providers.GitHub.DraftPullRequests == nil || *got.Providers.GitHub.DraftPullRequests != *tc.githubPushed {
+					t.Errorf("allowRepoCommands=%v: providers.github.draft_pull_requests = %v, want pushed %v", allowRepoCommands, got.Providers.GitHub.DraftPullRequests, *tc.githubPushed)
 				}
 			}
 		})

@@ -372,6 +372,20 @@ func parseCIFixTargets(raw string) (ciFixTargets, error) {
 
 func (t ciFixTargets) empty() bool { return len(t.Findings.Items) == 0 }
 
+// withoutMergeConflict returns the targets left once the pipeline itself has
+// integrated the base branch, so the fixer is never also asked to resolve the
+// conflict that integration already settled.
+func (t ciFixTargets) withoutMergeConflict() ciFixTargets {
+	out := ciFixTargets{Findings: t.Findings, Checks: t.Checks}
+	out.Findings.Items = nil
+	for _, item := range t.Findings.Items {
+		if item.Category != types.FindingCategoryCIMergeConflict {
+			out.Findings.Items = append(out.Findings.Items, item)
+		}
+	}
+	return out
+}
+
 // description names the round's targets the way the CI step log always has.
 func (t ciFixTargets) checkNames() []string {
 	names := make([]string, 0, len(t.Checks))

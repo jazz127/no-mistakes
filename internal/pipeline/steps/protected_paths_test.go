@@ -607,7 +607,7 @@ func TestProtectedPaths_UnreadableStatusFailsClosed(t *testing.T) {
 	t.Parallel()
 	sctx := newTestContext(t, &mockAgent{}, t.TempDir(), "", "", config.Commands{})
 	sctx.Config.ProtectedPaths = []string{"*.lock"}
-	if err := stagePipelineChanges(sctx); err == nil || !strings.Contains(err.Error(), "check protected_paths") {
+	if err := stagePipelineChanges(sctx); err == nil || !strings.Contains(err.Error(), "check protected_paths and scratch") {
 		t.Fatalf("unreadable git status did not fail closed: %v", err)
 	}
 }

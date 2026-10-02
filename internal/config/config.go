@@ -750,7 +750,55 @@ type ProvidersRaw struct {
 // GitHubProviderRaw is the YAML representation of GitHub provider settings.
 // Pointer fields distinguish "not set" (nil) from an explicit false.
 type GitHubProviderRaw struct {
-	DraftPullRequests *bool `yaml:"draft_pull_requests"`
+	DraftPullRequests *GitHubDraftPullRequests `yaml:"draft_pull_requests"`
+}
+
+// GitHubDraftPullRequests accepts the historical boolean setting plus the
+// upstream-only mode. Boolean YAML values remain compatible with existing
+// configuration files.
+type GitHubDraftPullRequests string
+
+const (
+	GitHubDraftPullRequestsOff      GitHubDraftPullRequests = "off"
+	GitHubDraftPullRequestsAll      GitHubDraftPullRequests = "all"
+	GitHubDraftPullRequestsUpstream GitHubDraftPullRequests = "upstream"
+)
+
+func (value *GitHubDraftPullRequests) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode {
+		return fmt.Errorf("draft_pull_requests must be a boolean or \"upstream\"")
+	}
+	switch node.Tag {
+	case "!!bool":
+		var enabled bool
+		if err := node.Decode(&enabled); err != nil {
+			return err
+		}
+		if enabled {
+			*value = GitHubDraftPullRequestsAll
+		} else {
+			*value = GitHubDraftPullRequestsOff
+		}
+		return nil
+	case "!!str":
+		if node.Value == string(GitHubDraftPullRequestsUpstream) {
+			*value = GitHubDraftPullRequestsUpstream
+			return nil
+		}
+	}
+	return fmt.Errorf("draft_pull_requests must be a boolean or \"upstream\", got %q", node.Value)
+}
+
+func (value GitHubDraftPullRequests) MarshalYAML() (interface{}, error) {
+	switch value {
+	case GitHubDraftPullRequestsAll:
+		return true, nil
+	case GitHubDraftPullRequestsOff:
+		return false, nil
+	case GitHubDraftPullRequestsUpstream:
+		return string(value), nil
+	}
+	return nil, fmt.Errorf("draft_pull_requests has unknown mode %q", string(value))
 }
 
 // GitLabProviderRaw is the YAML representation of GitLab provider settings.
@@ -784,6 +832,9 @@ type GitHubProvider struct {
 	// DraftPullRequests opens created GitHub PRs as drafts
 	// (gh pr create --draft). Default false.
 	DraftPullRequests bool
+	// DraftUpstreamPullRequests opens PRs as drafts when the base repository
+	// owner differs from the configured fork owner's account.
+	DraftUpstreamPullRequests bool
 }
 
 // GitLabProvider holds resolved GitLab provider settings.
@@ -2937,7 +2988,8 @@ func validateTestRaw(test TestRaw) error {
 // applyProvidersOverrides applies non-nil raw values onto resolved defaults.
 func applyProvidersOverrides(dst *Providers, src *ProvidersRaw) {
 	if src.GitHub.DraftPullRequests != nil {
-		dst.GitHub.DraftPullRequests = *src.GitHub.DraftPullRequests
+		dst.GitHub.DraftPullRequests = *src.GitHub.DraftPullRequests == GitHubDraftPullRequestsAll
+		dst.GitHub.DraftUpstreamPullRequests = *src.GitHub.DraftPullRequests == GitHubDraftPullRequestsUpstream
 	}
 	if src.GitLab.DraftPullRequests != nil {
 		dst.GitLab.DraftPullRequests = *src.GitLab.DraftPullRequests

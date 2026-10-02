@@ -426,6 +426,80 @@ func TestPRStep_CreatesConfiguredDraftPR(t *testing.T) {
 	}
 }
 
+func TestPRStep_UpstreamDraftModeUsesRepositoryOwners(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		upstream string
+		fork     string
+		want     bool
+	}{
+		{name: "upstream base", upstream: "https://github.com/kunchenguid/no-mistakes.git", fork: "git@github.com:jazz127/no-mistakes.git", want: true},
+		{name: "same owner house base", upstream: "https://github.com/jazz127/no-mistakes.git", fork: "git@github.com:jazz127/no-mistakes.git", want: false},
+	} {
+		for _, mode := range []string{"", config.PRAppendixFull, config.PRAppendixCollapsed, config.PRAppendixMinimal} {
+			t.Run(tc.name+"/appendix="+mode, func(t *testing.T) {
+				dir, baseSHA, headSHA := setupGitRepo(t)
+				env, logFile := fakeGH(t, "")
+				ag := &mockAgent{name: "test"}
+				sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+				sctx.Env = env
+				sctx.Repo.UpstreamURL = tc.upstream
+				sctx.Repo.ForkURL = tc.fork
+				sctx.Config.Providers.GitHub.DraftUpstreamPullRequests = true
+				sctx.Config.PR.Appendix = mode
+				base := "main"
+				if !tc.want {
+					base = "house"
+					sctx.Config.PR.BaseBranch = base
+					ensureLocalBranch(t, dir, base, baseSHA)
+				}
+				reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := sctx.DB.UpdateStepStatus(reviewStep.ID, types.StepStatusCompleted); err != nil {
+					t.Fatal(err)
+				}
+				findings := `{"findings":[],"summary":"clean","risk_level":"medium","risk_rationale":"routine change"}`
+				if err := sctx.DB.SetStepFindings(reviewStep.ID, findings); err != nil {
+					t.Fatal(err)
+				}
+				testStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := sctx.DB.UpdateStepStatus(testStep.ID, types.StepStatusCompleted); err != nil {
+					t.Fatal(err)
+				}
+				if err := sctx.DB.SetStepFindings(testStep.ID, `{"findings":[],"testing_summary":"Synthetic fixture evidence"}`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := (&PRStep{}).Execute(sctx); err != nil {
+					t.Fatal(err)
+				}
+				logData, err := os.ReadFile(logFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				gotDraft := strings.Contains(string(logData), "pr create --head jazz127:feature --base "+base+" --repo ") && strings.Contains(string(logData), "--draft")
+				if gotDraft != tc.want {
+					t.Errorf("gh pr create draft = %v, want %v; commands:\n%s", gotDraft, tc.want, logData)
+				}
+				body := string(logData)
+				if !strings.Contains(body, pipelineAttestationCommentPrefix) {
+					t.Fatal("PR creation lost the pipeline attestation")
+				}
+				if folded := strings.Contains(body, "<summary>Validation</summary>"); folded != (mode == config.PRAppendixCollapsed) {
+					t.Fatalf("appendix %q: collapsed Validation block = %v", mode, folded)
+				}
+				if testing := strings.Contains(body, "## Testing"); testing != (mode != config.PRAppendixMinimal) {
+					t.Fatalf("appendix %q: Testing section = %v", mode, testing)
+				}
+			})
+		}
+	}
+}
+
 func TestPRStep_UsesConfiguredBaseBranch(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
