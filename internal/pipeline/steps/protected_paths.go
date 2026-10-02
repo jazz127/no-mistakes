@@ -86,36 +86,37 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 
 // movedIntoScratch returns the deleted paths whose HEAD blob matches the
 // content of an excluded new scratch or cache file. Only excluded regular
-// files and symlinks whose size matches a deleted blob of the same kind are
-// hashed; symlinks are hashed by target, never followed.
+// files and symlinks are hashed, regular files with the same clean and EOL
+// conversion as the HEAD blob; symlinks are hashed by target, never followed.
 func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([]string, error) {
 	if len(deleted) == 0 || len(excluded) == 0 {
 		return nil, nil
-	}
-	type blobKind struct {
-		size int64
-		link bool
 	}
 	tree, err := stepGitRunRaw(sctx, append([]string{"--literal-pathspecs", "ls-tree", "-z", "-l", "--full-tree", "HEAD", "--"}, deleted...)...)
 	if err != nil {
 		return nil, err
 	}
 	headBlobs := map[string]string{}
-	kinds := map[blobKind]bool{}
+	hasRegular := false
+	linkSizes := map[int64]bool{}
 	for _, entry := range strings.Split(strings.TrimSuffix(tree, "\x00"), "\x00") {
 		meta, file, ok := strings.Cut(entry, "\t")
 		fields := strings.Fields(meta)
 		if !ok || len(fields) != 4 || fields[1] != "blob" {
 			continue
 		}
-		size, err := strconv.ParseInt(fields[3], 10, 64)
-		if err != nil {
-			continue
+		if fields[0] == "120000" {
+			size, err := strconv.ParseInt(fields[3], 10, 64)
+			if err != nil {
+				continue
+			}
+			linkSizes[size] = true
+		} else {
+			hasRegular = true
 		}
 		headBlobs[file] = fields[2]
-		kinds[blobKind{size: size, link: fields[0] == "120000"}] = true
 	}
-	if len(kinds) == 0 {
+	if len(headBlobs) == 0 {
 		return nil, nil
 	}
 	excludedBlobs := map[string]bool{}
@@ -127,12 +128,12 @@ func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([
 		}
 		switch {
 		case info.Mode().IsRegular():
-			if kinds[blobKind{size: info.Size()}] && !strings.Contains(file, "\n") {
+			if hasRegular && !strings.Contains(file, "\n") {
 				regular = append(regular, file)
 			}
 		case info.Mode()&os.ModeSymlink != 0:
 			target, err := os.Readlink(filepath.Join(sctx.WorkDir, filepath.FromSlash(file)))
-			if err != nil || !kinds[blobKind{size: int64(len(target)), link: true}] {
+			if err != nil || !linkSizes[int64(len(target))] {
 				continue
 			}
 			blob, err := stepGitRunInput(sctx, strings.NewReader(target), "hash-object", "--stdin")
