@@ -16,7 +16,7 @@ import (
 )
 
 // This fixture makes no live-product claim: it tests setup, not a user journey.
-const preparationNoSurface = `{"findings":[],"summary":"setup probe","tested":["inspected setup marker"],"testing_summary":"No live product journey in this fixture","artifacts":[],"scenarios":[{"name":"setup probe","result":"untested","live":false,"evidence":"","reason":"step-boundary fixture only"}],"verdict":"no-surface"}`
+const preparationNoSurface = `{"findings":[],"summary":"setup probe","tested":["inspected setup marker"],"testing_summary":"No live product journey in this fixture","artifacts":[],"scenarios":[{"name":"setup probe","result":"untested","live":false,"surface":"none","evidence":"","reason":"step-boundary fixture only"}],"verdict":"no-surface"}`
 
 func TestAgentOnlyPreparation_SharedAndRecovered(t *testing.T) {
 	for _, optIn := range []bool{false, true} {

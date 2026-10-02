@@ -35,6 +35,7 @@ func TestAnalyzerEvidenceFailuresFailPipelineJourney(t *testing.T) {
         - name: "fakeagent: simulated end-to-end scenario"
           result: pass
           live: true
+          surface: product
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go
@@ -54,6 +55,7 @@ func TestAnalyzerEvidenceFailuresFailPipelineJourney(t *testing.T) {
         - name: "fakeagent: simulated end-to-end scenario"
           result: pass
           live: true
+          surface: product
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go

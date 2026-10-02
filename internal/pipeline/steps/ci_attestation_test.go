@@ -121,6 +121,7 @@ func TestRebindPipelineAttestationHead_OmitsPreviousLiveValidation(t *testing.T)
 		Name:     "user reaches the success screen",
 		Result:   types.ScenarioResultPass,
 		Live:     true,
+		Surface:  types.ScenarioSurfaceProduct,
 		Evidence: "checkout.png",
 	}}, types.TestVerdictGo)
 	steps := []*db.StepResult{{
@@ -149,6 +150,7 @@ func TestRebindPipelineAttestationWithSteps_UsesCurrentLiveValidation(t *testing
 		Name:     "old scenario",
 		Result:   types.ScenarioResultPass,
 		Live:     true,
+		Surface:  types.ScenarioSurfaceProduct,
 		Evidence: "old.png",
 	}}, types.TestVerdictGo)
 	original := buildPipelineAttestation([]*db.StepResult{{
@@ -159,7 +161,8 @@ func TestRebindPipelineAttestationWithSteps_UsesCurrentLiveValidation(t *testing
 	}}, nil, testPipelineHeadSHA)
 	newHead := strings.Repeat("ef", 20)
 	currentFindings := liveValidatedFindingsJSON(t, []types.TestScenario{
-		{Name: "live scenario", Result: types.ScenarioResultPass, Live: true, Evidence: "live.png"},
+		{Name: "live scenario", Result: types.ScenarioResultPass, Live: true, Surface: types.ScenarioSurfaceProduct,
+			Evidence: "live.png"},
 		{Name: "blocked scenario", Result: types.ScenarioResultUntested, Reason: "browser unavailable"},
 	}, types.TestVerdictInconclusive, newHead)
 	currentSteps := []*db.StepResult{{
@@ -942,5 +945,23 @@ func TestPushStep_SkipsGhOnBaseBranch(t *testing.T) {
 
 	if logData, err := os.ReadFile(logFile); err == nil && len(logData) > 0 {
 		t.Fatalf("expected no gh invocation at all for a direct push to the base branch:\n%s", logData)
+	}
+}
+
+func TestLegacyCompletedGoKeepsLifecycleButPublishesConservatively(t *testing.T) {
+	t.Parallel()
+	findings := `{"findings":[],"summary":"","tested":["go test ./..."],"testing_summary":"legacy","scenarios":[{"name":"legacy scenario","result":"pass","live":true,"evidence":"output"}],"verdict":"go","tested_head_sha":"` + testPipelineHeadSHA + `"}`
+	step := &db.StepResult{
+		ID:           "test",
+		StepName:     types.StepTest,
+		Status:       types.StepStatusCompleted,
+		FindingsJSON: &findings,
+	}
+	if got := step.TestOverrideReason(); got != "" {
+		t.Fatalf("legacy clean Test reported an exception nobody approved: %q", got)
+	}
+	got := parsePipelineAttestationForTest(t, buildPipelineAttestation([]*db.StepResult{step}, nil, testPipelineHeadSHA)).LiveValidation
+	if got == nil || got.Verdict != types.TestVerdictInconclusive || got.Live != 0 || got.Total != 1 {
+		t.Fatalf("live validation = %+v, want inconclusive 0 of 1", got)
 	}
 }

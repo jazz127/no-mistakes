@@ -128,6 +128,7 @@ func defaultScenario() *Scenario {
 					"name":     "fakeagent: simulated end-to-end scenario",
 					"result":   "pass",
 					"live":     true,
+					"surface":  "product", // Canned claim for happy-path protocol tests, not product evidence.
 					"evidence": "fakeagent: simulated test run",
 					// Present-but-empty rather than omitted: the codex adapter
 					// rewrites every schema property as required-and-nullable,

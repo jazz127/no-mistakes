@@ -40,6 +40,7 @@ func cleanReviewFindings() Findings {
 			Name:     "the change works for a user",
 			Result:   types.ScenarioResultPass,
 			Live:     true,
+			Surface:  types.ScenarioSurfaceProduct,
 			Evidence: "go test ./...",
 		}},
 		Verdict:       types.TestVerdictGo,

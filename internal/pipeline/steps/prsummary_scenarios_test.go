@@ -2,6 +2,7 @@ package steps
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -48,8 +49,8 @@ func testStepWithFindings(t *testing.T, findingsJSON string) ([]*db.StepResult, 
 func TestBuildTestingSummary_RendersScenarioTableAndVerdict(t *testing.T) {
 	t.Parallel()
 	findingsJSON := liveValidatedFindingsJSON(t, []types.TestScenario{
-		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"},
-		{Name: "declined payment shows the retry copy", Result: types.ScenarioResultUntested, Reason: "no card sandbox credential on this machine"},
+		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Surface: types.ScenarioSurfaceProduct, Evidence: "checkout.png"},
+		{Name: "declined payment shows the retry copy", Result: types.ScenarioResultUntested, Surface: types.ScenarioSurfaceNone, Reason: "no card sandbox credential on this machine"},
 	}, types.TestVerdictGo)
 	steps, rounds := testStepWithFindings(t, findingsJSON)
 
@@ -72,7 +73,7 @@ func TestBuildTestingSummary_RendersScenarioTableAndVerdict(t *testing.T) {
 func TestBuildTestingSummary_NoGoVerdictIsVisible(t *testing.T) {
 	t.Parallel()
 	findingsJSON := liveValidatedFindingsJSON(t, []types.TestScenario{
-		{Name: "user reaches the success screen", Result: types.ScenarioResultFail, Live: true, Evidence: "checkout.png"},
+		{Name: "user reaches the success screen", Result: types.ScenarioResultFail, Live: true, Surface: types.ScenarioSurfaceProduct, Evidence: "checkout.png"},
 	}, types.TestVerdictNoGo)
 	steps, rounds := testStepWithFindings(t, findingsJSON)
 
@@ -88,7 +89,7 @@ func TestBuildTestingSummary_NoGoVerdictIsVisible(t *testing.T) {
 func TestBuildTestingSummary_NoSurfaceVerdictIsVisible(t *testing.T) {
 	t.Parallel()
 	findingsJSON := liveValidatedFindingsJSON(t, []types.TestScenario{
-		{Name: "Windows git-heavy shard runs the git-backed packages", Result: types.ScenarioResultUntested, Reason: "CI workflow YAML has no running product no-mistakes can drive"},
+		{Name: "Windows git-heavy shard runs the git-backed packages", Result: types.ScenarioResultUntested, Surface: types.ScenarioSurfaceNone, Reason: "CI workflow YAML has no running product no-mistakes can drive"},
 	}, types.TestVerdictNoSurface)
 	steps, rounds := testStepWithFindings(t, findingsJSON)
 
@@ -122,7 +123,7 @@ func TestBuildTestingSummary_PreContractRunRendersUnchanged(t *testing.T) {
 func TestBuildPipelineSummary_OmitsLiveValidationAfterHeadChanges(t *testing.T) {
 	t.Parallel()
 	findingsJSON := liveValidatedFindingsJSON(t, []types.TestScenario{
-		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"},
+		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Surface: types.ScenarioSurfaceProduct, Evidence: "checkout.png"},
 	}, types.TestVerdictGo)
 	steps, rounds := testStepWithFindings(t, findingsJSON)
 
@@ -135,7 +136,7 @@ func TestBuildPipelineSummary_OmitsLiveValidationAfterHeadChanges(t *testing.T) 
 func TestBuildPipelineSummary_StepFoldCarriesScenarioTable(t *testing.T) {
 	t.Parallel()
 	findingsJSON := liveValidatedFindingsJSON(t, []types.TestScenario{
-		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"},
+		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Surface: types.ScenarioSurfaceProduct, Evidence: "checkout.png"},
 	}, types.TestVerdictGo)
 	steps, rounds := testStepWithFindings(t, findingsJSON)
 
@@ -153,7 +154,7 @@ func TestBuildPipelineSummary_StepFoldCarriesScenarioTable(t *testing.T) {
 func TestBuildTestingSummary_ScenarioCellsCannotBreakTheTable(t *testing.T) {
 	t.Parallel()
 	findingsJSON := liveValidatedFindingsJSON(t, []types.TestScenario{
-		{Name: "user runs `a | b`\nand sees output", Result: types.ScenarioResultPass, Live: true, Evidence: "x | y"},
+		{Name: "user runs `a | b`\nand sees output", Result: types.ScenarioResultPass, Live: true, Surface: types.ScenarioSurfaceProduct, Evidence: "x | y"},
 	}, types.TestVerdictGo)
 	steps, rounds := testStepWithFindings(t, findingsJSON)
 
@@ -177,7 +178,7 @@ func TestBuildTestingSummary_ScenarioCellsCannotBreakTheTable(t *testing.T) {
 func TestBuildPipelineSummary_ScenarioTableRendersOnBitbucket(t *testing.T) {
 	t.Parallel()
 	findingsJSON := liveValidatedFindingsJSON(t, []types.TestScenario{
-		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"},
+		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Surface: types.ScenarioSurfaceProduct, Evidence: "checkout.png"},
 	}, types.TestVerdictGo)
 	steps, rounds := testStepWithFindings(t, findingsJSON)
 
@@ -187,5 +188,49 @@ func TestBuildPipelineSummary_ScenarioTableRendersOnBitbucket(t *testing.T) {
 	}
 	if !strings.Contains(md, "| user reaches the success screen | ✅ pass | live | checkout.png |") {
 		t.Errorf("expected the scenario table on bitbucket, got:\n%s", md)
+	}
+}
+
+// Synthetic reproduction of the reported fake-gh evidence shape. The non-empty
+// evidence block must not let a substituted upstream count as product validation.
+func simulatedGHFindingsJSON(t *testing.T) string {
+	t.Helper()
+	scenarios := make([]map[string]any, 0, 10)
+	for i := 0; i < 9; i++ {
+		scenarios = append(scenarios, map[string]any{
+			"name":   fmt.Sprintf("fake-gh merge/CLI scenario %d", i+1),
+			"result": "pass", "live": true, "surface": "simulated",
+			"evidence": "built CLI with offline fake gh fixture; captured output", "reason": "",
+		})
+	}
+	scenarios = append(scenarios, map[string]any{
+		"name": "upstream base-ref read", "result": "pass", "live": true,
+		"surface": "product", "evidence": "gh api repos/owner/repo/git/ref/heads/main", "reason": "",
+	})
+	raw, err := json.Marshal(map[string]any{
+		"findings": []any{}, "summary": "", "tested": []string{"synthetic fake-gh reproduction"},
+		"testing_summary": "nine substituted scenarios and one API read",
+		"artifacts":       []any{}, "scenarios": scenarios, "verdict": "go", "tested_head_sha": testPipelineHeadSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func TestBuildPipelineSummary_SimulatedGHScenariosDoNotAttestGo(t *testing.T) {
+	t.Parallel()
+	steps, rounds := testStepWithFindings(t, simulatedGHFindingsJSON(t))
+	attestation := newPipelineAttestation(steps, rounds, testPipelineHeadSHA, pipelineAttestationPolicy{})
+	if got := attestation.LiveValidation; got == nil || got.Verdict != types.TestVerdictInconclusive || got.Live != 1 || got.Total != 10 {
+		t.Fatalf("synthetic fake-gh attestation = %+v, want inconclusive, 1 of 10", got)
+	}
+	for _, md := range []string{BuildTestingSummary(steps, rounds), func() string { body, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA); return body }()} {
+		if !strings.Contains(md, "Live validation: ⚠️ inconclusive - 1 of 10 scenarios driven live against the product") {
+			t.Fatalf("synthetic fake-gh summary has incorrect verdict/count:\n%s", md)
+		}
+		if strings.Contains(md, "| fake-gh merge/CLI scenario 1 | ✅ pass | live |") {
+			t.Fatalf("substituted scenario rendered live:\n%s", md)
+		}
 	}
 }
