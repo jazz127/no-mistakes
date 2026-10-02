@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1176,5 +1177,35 @@ func TestProtectedPaths_UnreadableStatusFailsClosed(t *testing.T) {
 	sctx.Config.ProtectedPaths = []string{"*.lock"}
 	if err := stagePipelineChanges(sctx); err == nil || !strings.Contains(err.Error(), "check protected_paths") {
 		t.Fatalf("unreadable git status did not fail closed: %v", err)
+	}
+}
+
+func TestArgvBatchesBoundCountAndLength(t *testing.T) {
+	long := "node_modules/.pnpm/" + strings.Repeat("p", 180)
+	var paths []string
+	for i := 0; i < 300; i++ {
+		paths = append(paths, long+strconv.Itoa(i))
+	}
+	huge := strings.Repeat("x", 40<<10)
+	paths = append(paths, huge, "a")
+	var flat []string
+	for _, batch := range argvBatches(paths) {
+		if len(batch) == 0 || len(batch) > 256 {
+			t.Fatalf("batch size %d", len(batch))
+		}
+		size := 0
+		for _, file := range batch {
+			size += len(file) + 1
+		}
+		if len(batch) > 1 && size > 16<<10 {
+			t.Fatalf("multi-path batch of %d bytes exceeds budget", size)
+		}
+		if slices.Contains(batch, huge) && len(batch) != 1 {
+			t.Fatalf("overlong path shares a batch of %d", len(batch))
+		}
+		flat = append(flat, batch...)
+	}
+	if !slices.Equal(flat, paths) {
+		t.Fatal("batches do not preserve every path in order")
 	}
 }

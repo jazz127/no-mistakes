@@ -144,9 +144,8 @@ func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([
 			excludedBlobs[strings.TrimSpace(blob)] = true
 		}
 	}
-	const hashBatch = 256
-	for start := 0; start < len(regular); start += hashBatch {
-		out, err := stepGitRun(sctx, append([]string{"hash-object", "--"}, regular[start:min(start+hashBatch, len(regular))]...)...)
+	for _, batch := range argvBatches(regular) {
+		out, err := stepGitRun(sctx, append([]string{"hash-object", "--"}, batch...)...)
 		if err != nil {
 			return nil, err
 		}
@@ -161,6 +160,25 @@ func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([
 		}
 	}
 	return moved, nil
+}
+
+// argvBatches splits paths into command-line batches small enough for
+// Windows' 32,767-character limit; a single overlong path runs alone.
+func argvBatches(paths []string) [][]string {
+	const maxCount, maxBytes = 256, 16 << 10
+	var batches [][]string
+	start, size := 0, 0
+	for i, file := range paths {
+		if i > start && (i-start == maxCount || size+len(file)+1 > maxBytes) {
+			batches = append(batches, paths[start:i])
+			start, size = i, 0
+		}
+		size += len(file) + 1
+	}
+	if start < len(paths) {
+		batches = append(batches, paths[start:])
+	}
+	return batches
 }
 
 func literalPathspecs(files []string) []string {
