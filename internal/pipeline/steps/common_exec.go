@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -197,6 +198,21 @@ func stepGitRun(sctx *pipeline.StepContext, args ...string) (string, error) {
 func stepGitRunRaw(sctx *pipeline.StepContext, args ...string) (string, error) {
 	cmd := stepCmd(sctx, "git", args...)
 	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
+	out, err := cmd.Output()
+	if err != nil {
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(ee.Stderr))
+		}
+		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
+	}
+	return string(out), nil
+}
+
+func stepGitRunInput(sctx *pipeline.StepContext, input io.Reader, args ...string) (string, error) {
+	cmd := stepCmd(sctx, "git", args...)
+	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
+	cmd.Stdin = input
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""

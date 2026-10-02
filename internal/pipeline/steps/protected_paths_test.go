@@ -603,6 +603,116 @@ func TestProtectedPaths_Staging(t *testing.T) {
 	}
 }
 
+func TestDocumentCommitLeavesScratchNotesUntracked(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	for file, content := range map[string]string{
+		"docs/updated.md":   "document step output\n",
+		"scratch/notes.txt": "temporary notes\n",
+	} {
+		fullPath := filepath.Join(dir, filepath.FromSlash(file))
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	committed, err := commitAgentFixesWithResult(sctx, types.StepDocument, "update docs", "")
+	if err != nil {
+		t.Fatalf("commit document changes: %v", err)
+	}
+	if !committed {
+		t.Fatal("document commit was not created")
+	}
+	if got := gitCmd(t, dir, "show", "HEAD:docs/updated.md"); got != "document step output" {
+		t.Fatalf("document output in commit = %q", got)
+	}
+	if got := gitCmd(t, dir, "ls-tree", "HEAD", "--", "scratch/notes.txt"); got != "" {
+		t.Fatalf("scratch notes were committed: %q", got)
+	}
+	if got := gitStatusPorcelain(t, dir); !strings.Contains(got, "?? scratch/") {
+		t.Fatalf("scratch notes are not left untracked: %q", got)
+	}
+}
+
+func TestStagePipelineChanges_LeavesUntrackedScratchAndCachesOut(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		file   string
+		staged bool
+	}{
+		{name: "scratch_directory", file: "scratch/notes.txt"},
+		{name: "node_modules_cache", file: "node_modules/pkg/index.js"},
+		{name: "nested_cache", file: ".codex-live-check/cache/node/corepack/index.js"},
+		{name: "scratch_script", file: "tests/_all.sh"},
+		{name: "newly_staged_cache", file: ".cache/tool/data", staged: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			fullPath := filepath.Join(dir, filepath.FromSlash(tc.file))
+			if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(fullPath, []byte("temporary\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.staged {
+				gitCmd(t, dir, "add", tc.file)
+			}
+			var logs []string
+			sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Log = func(line string) { logs = append(logs, line) }
+			if err := stagePipelineChanges(sctx); err != nil {
+				t.Fatalf("stage pipeline changes: %v", err)
+			}
+			if got := gitCmd(t, dir, "diff", "--cached", "--name-only"); got != "" {
+				t.Fatalf("scratch/cache entered index: %q", got)
+			}
+			if got := gitStatusPorcelain(t, dir); !strings.Contains(got, "?? "+strings.Split(tc.file, "/")[0]+"/") {
+				t.Fatalf("scratch/cache disappeared from worktree status: %q", got)
+			}
+			if joined := strings.Join(logs, "\n"); !strings.Contains(joined, tc.file) && !strings.Contains(joined, strings.Split(tc.file, "/")[0]+"/") {
+				t.Fatalf("scratch/cache was not named in step log: %q", joined)
+			}
+		})
+	}
+}
+
+func TestStagePipelineChanges_StagesTrackedChangesBesideUntrackedCache(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := setupGitRepo(t)
+	tracked := filepath.Join(dir, "node_modules", "tracked.js")
+	untracked := filepath.Join(dir, "node_modules", "new.js")
+	if err := os.MkdirAll(filepath.Dir(tracked), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tracked, []byte("tracked base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "node_modules/tracked.js")
+	gitCmd(t, dir, "commit", "-m", "add tracked cache fixture")
+	if err := os.WriteFile(tracked, []byte("tracked changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(untracked, []byte("new cache file\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, gitCmd(t, dir, "rev-parse", "HEAD"), config.Commands{})
+	if err := stagePipelineChanges(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitCmd(t, dir, "diff", "--cached", "--name-only"); got != "node_modules/tracked.js" {
+		t.Fatalf("staged paths = %q", got)
+	}
+	if got := gitStatusPorcelain(t, dir); !strings.Contains(got, "?? node_modules/new.js") {
+		t.Fatalf("untracked cache file was not left out: %q", got)
+	}
+}
+
 // A rebase onto a base that bumped a submodule moves the recorded pointer but
 // leaves a populated checkout at the old commit. Catch-all staging must not
 // commit that stale checkout back as the pointer.
