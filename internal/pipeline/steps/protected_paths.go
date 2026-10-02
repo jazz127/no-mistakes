@@ -22,7 +22,7 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 	if err != nil {
 		return fmt.Errorf("check protected_paths and scratch: %w", err)
 	}
-	var changed, unstage []string
+	var changed, unstage, deleted []string
 	scratch := newScratchExclusions()
 	for _, entry := range strings.Split(strings.TrimSuffix(status, "\x00"), "\x00") {
 		if entry == "" {
@@ -37,13 +37,28 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 				return &pipeline.ProtectedPathError{Path: file, Rule: pattern}
 			}
 		}
-		if (entry[:2] == "??" || entry[0] == 'A') && scratch.add(file) {
-			if entry[0] == 'A' {
+		if (entry[:2] == "??" || entry[0] == 'A' || entry[1] == 'A') && scratch.add(file) {
+			if entry[:2] != "??" {
 				unstage = append(unstage, file)
 			}
 			continue
 		}
 		changed = append(changed, file)
+		if entry[0] == 'D' || (entry[1] == 'D' && entry[0] != 'A') {
+			deleted = append(deleted, file)
+		}
+	}
+	// A new scratch path may be the destination of a tracked move, including
+	// an unstaged or heavily edited move that rename detection cannot identify.
+	// Defer deletions whenever we exclude new scratch, preserving both sides
+	// in the worktree and the original content in HEAD instead of committing
+	// only the deletion. Unrelated deletions are conservatively deferred too.
+	if len(scratch.order) > 0 && len(deleted) > 0 {
+		if _, err := stepGitRunInput(sctx, nulPathspecs(literalPathspecs(deleted)), "reset", "-q", "HEAD", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
+			return fmt.Errorf("unstage possible scratch move sources: %w", err)
+		}
+	} else {
+		deleted = nil
 	}
 	if len(unstage) > 0 {
 		if _, err := stepGitRunInput(sctx, nulPathspecs(literalPathspecs(unstage)), "rm", "--cached", "-f", "-q", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
@@ -51,11 +66,17 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 		}
 	}
 	specs := append([]string{"."}, scratch.pathspecs(changed)...)
+	for _, file := range deleted {
+		specs = append(specs, ":(exclude,literal)"+file)
+	}
 	if _, err := stepGitRunInput(sctx, nulPathspecs(specs), "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
 		return err
 	}
 	if summary := scratch.summary(); summary != "" {
 		sctx.Log("left new tool caches and scratch out of the commit (still in the run worktree): " + summary)
+	}
+	if len(deleted) > 0 {
+		sctx.Log("left tracked deletions out of the commit (possible moves into excluded scratch; still in the run worktree): " + strings.Join(deleted, ", "))
 	}
 	return unstageSubmodulePointerMoves(sctx)
 }
@@ -106,7 +127,7 @@ func scratchRoot(file string) (root, reason string, ok bool) {
 		inCache = inCache || part == "cache" || strings.HasPrefix(part, ".")
 	}
 	base := parts[len(parts)-1]
-	if !isDir && len(parts) == 2 && (parts[0] == "tests" || parts[0] == "test") && strings.HasPrefix(base, "_") && !strings.HasPrefix(base, "__") {
+	if !isDir && len(parts) == 2 && (parts[0] == "tests" || parts[0] == "test") && strings.HasPrefix(base, "_") {
 		switch path.Ext(base) {
 		case ".sh", ".bash", ".zsh":
 			return file, "scratch script", true

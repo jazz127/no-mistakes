@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -634,6 +635,132 @@ func TestDocumentCommitLeavesScratchNotesUntracked(t *testing.T) {
 	}
 	if got := gitStatusPorcelain(t, dir); !strings.Contains(got, "?? scratch/") {
 		t.Fatalf("scratch notes are not left untracked: %q", got)
+	}
+}
+
+func TestDocumentCommitLeavesIntentToAddAndDoubleUnderscoreScratchOut(t *testing.T) {
+	t.Parallel()
+	for _, file := range []string{"scratch/notes.txt", ".cache/tool/data", "tests/__setup.sh", "test/__setup.bash", "tests/__setup.zsh"} {
+		for _, intentToAdd := range []bool{false, true} {
+			t.Run(file+"/intent="+strconv.FormatBool(intentToAdd), func(t *testing.T) {
+				t.Parallel()
+				dir, baseSHA, headSHA := setupGitRepo(t)
+				fullPath := filepath.Join(dir, filepath.FromSlash(file))
+				if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(fullPath, []byte("temporary\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if intentToAdd {
+					gitCmd(t, dir, "add", "-N", "--", file)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "doc.md"), []byte("document output\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				var logs []string
+				sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+				sctx.Log = func(line string) { logs = append(logs, line) }
+				committed, err := commitAgentFixesWithResult(sctx, types.StepDocument, "update docs", "")
+				if err != nil || !committed {
+					t.Fatalf("document commit: committed=%v err=%v", committed, err)
+				}
+				if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-only"); got != "doc.md" {
+					t.Fatalf("document commit paths = %q", got)
+				}
+				if got := gitCmd(t, dir, "ls-files", "--", file); got != "" {
+					t.Fatalf("scratch remains in index: %q", got)
+				}
+				if got, err := os.ReadFile(fullPath); err != nil || string(got) != "temporary\n" {
+					t.Fatalf("scratch worktree content = %q, err=%v", got, err)
+				}
+				if !strings.Contains(strings.Join(logs, "\n"), "left new tool caches and scratch out of the commit") {
+					t.Fatalf("scratch exclusion was not logged: %v", logs)
+				}
+			})
+		}
+	}
+}
+
+func TestDocumentCommitDefersTrackedMovesIntoScratch(t *testing.T) {
+	t.Parallel()
+	for _, destination := range []string{"scratch/moved.txt", ".cache/moved.txt", "tests/__moved.sh"} {
+		for _, staging := range []string{"unstaged", "staged", "intent-to-add"} {
+			for _, edited := range []bool{false, true} {
+				t.Run(destination+"/"+staging+"/edited="+strconv.FormatBool(edited), func(t *testing.T) {
+					t.Parallel()
+					dir, baseSHA, headSHA := setupGitRepo(t)
+					const source = "feature.txt"
+					original, err := os.ReadFile(filepath.Join(dir, source))
+					if err != nil {
+						t.Fatal(err)
+					}
+					fullPath := filepath.Join(dir, filepath.FromSlash(destination))
+					if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Rename(filepath.Join(dir, source), fullPath); err != nil {
+						t.Fatal(err)
+					}
+					content := original
+					if edited {
+						content = []byte("entirely rewritten moved content\n")
+						if err := os.WriteFile(fullPath, content, 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+					switch staging {
+					case "staged":
+						gitCmd(t, dir, "add", "-A")
+					case "intent-to-add":
+						gitCmd(t, dir, "add", "-N", "--", destination)
+					}
+					if err := os.WriteFile(filepath.Join(dir, "doc.md"), []byte("document output\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+					var logs []string
+					sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+					sctx.Log = func(line string) { logs = append(logs, line) }
+					committed, err := commitAgentFixesWithResult(sctx, types.StepDocument, "update docs", "")
+					if err != nil || !committed {
+						t.Fatalf("document commit: committed=%v err=%v", committed, err)
+					}
+					if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-only"); got != "doc.md" {
+						t.Fatalf("document commit staged half a move: %q", got)
+					}
+					if got := gitCmd(t, dir, "show", "HEAD:"+source); got != strings.TrimSpace(string(original)) {
+						t.Fatalf("committed source content = %q", got)
+					}
+					if got := gitCmd(t, dir, "ls-files", "--", destination); got != "" {
+						t.Fatalf("move destination remains in index: %q", got)
+					}
+					if got, err := os.ReadFile(fullPath); err != nil || string(got) != string(content) {
+						t.Fatalf("moved worktree content = %q, err=%v", got, err)
+					}
+					if _, err := os.Stat(filepath.Join(dir, source)); !os.IsNotExist(err) {
+						t.Fatalf("deleted source was restored in worktree: %v", err)
+					}
+					if !strings.Contains(strings.Join(logs, "\n"), "left tracked deletions out of the commit") {
+						t.Fatalf("deferred deletion was not logged: %v", logs)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestStagePipelineChanges_StagesTrackedDeletionWithoutNewScratch(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	if err := os.Remove(filepath.Join(dir, "feature.txt")); err != nil {
+		t.Fatal(err)
+	}
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	if err := stagePipelineChanges(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitCmd(t, dir, "diff", "--cached", "--name-status"); got != "D\tfeature.txt" {
+		t.Fatalf("tracked deletion was not staged: %q", got)
 	}
 }
 
