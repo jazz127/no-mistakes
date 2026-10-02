@@ -861,6 +861,40 @@ func TestDocumentCommitDefersCRLFMoveIntoScratch(t *testing.T) {
 	}
 }
 
+func TestDocumentCommitDefersPathScopedCRLFMoveIntoScratch(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("/scripts/*.bat text eol=crlf\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "scripts", "build.bat"), []byte("echo one\r\necho two\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", ".gitattributes", "scripts/build.bat")
+	gitCmd(t, dir, "commit", "-m", "add build script")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	if err := os.MkdirAll(filepath.Join(dir, "scratch"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(dir, "scripts", "build.bat"), filepath.Join(dir, "scratch", "build.bat")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "doc.md"), []byte("document output\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	committed, err := commitAgentFixesWithResult(sctx, types.StepDocument, "update docs", "")
+	if err != nil || !committed {
+		t.Fatalf("document commit: committed=%v err=%v", committed, err)
+	}
+	if got := gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-only"); got != "doc.md" {
+		t.Fatalf("document commit staged half a path-scoped CRLF move: %q", got)
+	}
+}
+
 func TestDocumentCommitDefersTrackedSymlinkMoveIntoScratch(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, _ := setupGitRepo(t)

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -86,8 +87,9 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 
 // movedIntoScratch returns the deleted paths whose HEAD blob matches the
 // content of an excluded new scratch or cache file. Only excluded regular
-// files and symlinks are hashed, regular files with the same clean and EOL
-// conversion as the HEAD blob; symlinks are hashed by target, never followed.
+// files and symlinks are hashed. Regular files are cleaned under each deleted
+// path's attributes, as its HEAD blob was; symlinks are hashed by target,
+// never followed.
 func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([]string, error) {
 	if len(deleted) == 0 || len(excluded) == 0 {
 		return nil, nil
@@ -97,7 +99,7 @@ func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([
 		return nil, err
 	}
 	headBlobs := map[string]string{}
-	hasRegular := false
+	links := map[string]bool{}
 	linkSizes := map[int64]bool{}
 	for _, entry := range strings.Split(strings.TrimSuffix(tree, "\x00"), "\x00") {
 		meta, file, ok := strings.Cut(entry, "\t")
@@ -110,16 +112,15 @@ func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([
 			if err != nil {
 				continue
 			}
+			links[file] = true
 			linkSizes[size] = true
-		} else {
-			hasRegular = true
 		}
 		headBlobs[file] = fields[2]
 	}
 	if len(headBlobs) == 0 {
 		return nil, nil
 	}
-	excludedBlobs := map[string]bool{}
+	linkBlobs := map[string]bool{}
 	var regular []string
 	for _, file := range excluded {
 		info, err := os.Lstat(filepath.Join(sctx.WorkDir, filepath.FromSlash(file)))
@@ -128,9 +129,7 @@ func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([
 		}
 		switch {
 		case info.Mode().IsRegular():
-			if hasRegular && !strings.Contains(file, "\n") {
-				regular = append(regular, file)
-			}
+			regular = append(regular, file)
 		case info.Mode()&os.ModeSymlink != 0:
 			target, err := os.Readlink(filepath.Join(sctx.WorkDir, filepath.FromSlash(file)))
 			if err != nil || !linkSizes[int64(len(target))] {
@@ -140,22 +139,32 @@ func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([
 			if err != nil {
 				return nil, err
 			}
-			excludedBlobs[strings.TrimSpace(blob)] = true
+			linkBlobs[strings.TrimSpace(blob)] = true
 		}
 	}
-	if len(regular) > 0 {
-		out, err := stepGitRunInput(sctx, strings.NewReader(strings.Join(regular, "\n")+"\n"), "hash-object", "--stdin-paths")
-		if err != nil {
-			return nil, err
-		}
-		for _, blob := range strings.Fields(out) {
-			excludedBlobs[blob] = true
-		}
-	}
+	const hashBatch = 256
 	var moved []string
 	for _, file := range deleted {
-		if blob, ok := headBlobs[file]; ok && excludedBlobs[blob] {
-			moved = append(moved, file)
+		blob, ok := headBlobs[file]
+		if !ok {
+			continue
+		}
+		if links[file] {
+			if linkBlobs[blob] {
+				moved = append(moved, file)
+			}
+			continue
+		}
+		for start := 0; start < len(regular); start += hashBatch {
+			batch := regular[start:min(start+hashBatch, len(regular))]
+			out, err := stepGitRun(sctx, append([]string{"hash-object", "--path=" + file, "--"}, batch...)...)
+			if err != nil {
+				return nil, err
+			}
+			if slices.Contains(strings.Fields(out), blob) {
+				moved = append(moved, file)
+				break
+			}
 		}
 	}
 	return moved, nil
