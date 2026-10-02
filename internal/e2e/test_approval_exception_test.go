@@ -41,6 +41,7 @@ func TestAxiTestApprovalExceptionJourney(t *testing.T) {
 				scenarioYAML := `        - name: synthetic scenario
           result: fail
           live: true
+          surface: product
           evidence: "fakeagent: simulated failure"
           reason: ""`
 				switch tc.verdict {
@@ -48,12 +49,14 @@ func TestAxiTestApprovalExceptionJourney(t *testing.T) {
 					scenarioYAML = `        - name: synthetic scenario
           result: untested
           live: false
+          surface: none
           evidence: "fakeagent: not driven"
           reason: "synthetic missing capability"`
 				case "no-surface":
 					scenarioYAML = `        - name: synthetic docs scenario
           result: untested
           live: false
+          surface: none
           evidence: "fakeagent: no runtime surface"
           reason: "synthetic docs-only change"`
 				}

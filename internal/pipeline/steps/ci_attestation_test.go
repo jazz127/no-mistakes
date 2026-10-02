@@ -121,6 +121,7 @@ func TestRebindPipelineAttestationHead_OmitsPreviousLiveValidation(t *testing.T)
 		Name:     "user reaches the success screen",
 		Result:   types.ScenarioResultPass,
 		Live:     true,
+		Surface:  types.ScenarioSurfaceProduct,
 		Evidence: "checkout.png",
 	}}, types.TestVerdictGo)
 	steps := []*db.StepResult{{
@@ -149,6 +150,7 @@ func TestRebindPipelineAttestationWithSteps_UsesCurrentLiveValidation(t *testing
 		Name:     "old scenario",
 		Result:   types.ScenarioResultPass,
 		Live:     true,
+		Surface:  types.ScenarioSurfaceProduct,
 		Evidence: "old.png",
 	}}, types.TestVerdictGo)
 	original := buildPipelineAttestation([]*db.StepResult{{
@@ -159,7 +161,8 @@ func TestRebindPipelineAttestationWithSteps_UsesCurrentLiveValidation(t *testing
 	}}, nil, testPipelineHeadSHA)
 	newHead := strings.Repeat("ef", 20)
 	currentFindings := liveValidatedFindingsJSON(t, []types.TestScenario{
-		{Name: "live scenario", Result: types.ScenarioResultPass, Live: true, Evidence: "live.png"},
+		{Name: "live scenario", Result: types.ScenarioResultPass, Live: true, Surface: types.ScenarioSurfaceProduct,
+			Evidence: "live.png"},
 		{Name: "blocked scenario", Result: types.ScenarioResultUntested, Reason: "browser unavailable"},
 	}, types.TestVerdictInconclusive, newHead)
 	currentSteps := []*db.StepResult{{
