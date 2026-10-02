@@ -62,6 +62,7 @@ func collectTestingVerdict(sr *db.StepResult, rounds []*db.StepRound) string {
 // validated": the verdict plus how much of the scenario list was actually
 // driven against the product. It returns "" when neither is recorded.
 func renderLiveValidationLine(scenarios []types.TestScenario, verdict string) string {
+	verdict = types.LiveValidationVerdict(scenarios, verdict)
 	live, total := types.LiveScenarioCounts(scenarios)
 	if !types.IsKnownTestVerdict(verdict) && total == 0 {
 		return ""
@@ -126,7 +127,7 @@ func renderScenarioTable(scenarios []types.TestScenario, flavor prBodyFlavor) st
 		}
 		result := scenario.Result
 		live := "no"
-		if scenario.Live {
+		if scenario.IsLive() {
 			live = "live"
 		}
 		basis := strings.TrimSpace(scenario.Evidence)

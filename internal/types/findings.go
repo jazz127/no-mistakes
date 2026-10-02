@@ -213,7 +213,8 @@ type Finding struct {
 // user intent and the change, and the result of driving it.
 //
 // Live is the whole point of the record: it is true ONLY when the scenario was
-// driven against the real product in this run. A unit test, a stub, a recorded
+// driven against the real product and actual upstream services in this run.
+// Surface records whether either was substituted. A unit test, a stub, a recorded
 // fixture, or reading the code is not live, and a scenario that could not be
 // driven here is reported with Result ScenarioResultUntested plus a Reason
 // explaining the unavailable capability or absence of a live product surface,
@@ -222,8 +223,45 @@ type TestScenario struct {
 	Name     string `json:"name"`
 	Result   string `json:"result"`
 	Live     bool   `json:"live"`
+	Surface  string `json:"surface,omitempty"`
 	Evidence string `json:"evidence"`
 	Reason   string `json:"reason"`
+}
+
+// Surface classifies the whole exercised path, including the product's upstream
+// services. Disposable data and a running product instance are fine; replacing
+// the product or an upstream with a fake, stub, mock, fixture, recorded/synthetic
+// response, or offline substitute is simulated.
+const (
+	ScenarioSurfaceProduct   = "product"
+	ScenarioSurfaceSimulated = "simulated"
+	ScenarioSurfaceNone      = "none"
+)
+
+func IsKnownScenarioSurface(surface string) bool {
+	return surface == ScenarioSurfaceProduct || surface == ScenarioSurfaceSimulated || surface == ScenarioSurfaceNone
+}
+
+// IsLive requires affirmative surface provenance, not just an agent's boolean.
+// Older records without a surface remain readable but cannot certify live work.
+func (s TestScenario) IsLive() bool {
+	return s.Live && s.Surface == ScenarioSurfaceProduct &&
+		(s.Result == ScenarioResultPass || s.Result == ScenarioResultFail) && strings.TrimSpace(s.Evidence) != ""
+}
+
+// LiveValidationVerdict prevents a go verdict from certifying substituted or
+// unspecified surfaces. A recorded no-go stays no-go; ordinary untested product
+// scenarios keep the existing verdict policy.
+func LiveValidationVerdict(scenarios []TestScenario, verdict string) string {
+	if verdict != TestVerdictGo {
+		return verdict
+	}
+	for _, s := range scenarios {
+		if !IsKnownScenarioSurface(s.Surface) || s.Surface == ScenarioSurfaceSimulated || (s.Live && !s.IsLive()) {
+			return TestVerdictInconclusive
+		}
+	}
+	return verdict
 }
 
 // LiveScenarioCounts returns how many of scenarios were driven live against
@@ -231,7 +269,7 @@ type TestScenario struct {
 func LiveScenarioCounts(scenarios []TestScenario) (live, total int) {
 	for _, s := range scenarios {
 		total++
-		if s.Live {
+		if s.IsLive() {
 			live++
 		}
 	}

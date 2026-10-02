@@ -23,7 +23,7 @@ func TestFindingsSelectionKeepsTestEvidence(t *testing.T) {
 		Tested:         []string{"`npm run e2e -- checkout`"},
 		TestingSummary: "drove checkout against a running app",
 		Artifacts:      []types.TestArtifact{{Kind: "screenshot", Label: "checkout", Path: "checkout.png"}},
-		Scenarios:      []types.TestScenario{{Name: "user reaches the success screen", Result: types.ScenarioResultFail, Live: true}},
+		Scenarios:      []types.TestScenario{{Name: "user reaches the success screen", Result: types.ScenarioResultFail, Live: true, Surface: types.ScenarioSurfaceProduct, Evidence: "checkout.png"}},
 		Verdict:        types.TestVerdictNoGo,
 	})
 	if err != nil {
@@ -48,7 +48,7 @@ func TestFindingsSelectionKeepsTestEvidence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v (payload %s)", name, err, got)
 		}
-		if len(parsed.Scenarios) != 1 || parsed.Scenarios[0].Name != "user reaches the success screen" {
+		if len(parsed.Scenarios) != 1 || parsed.Scenarios[0].Name != "user reaches the success screen" || parsed.Scenarios[0].Surface != types.ScenarioSurfaceProduct {
 			t.Errorf("%s dropped the scenario record: %s", name, got)
 		}
 		if parsed.Verdict != types.TestVerdictNoGo {

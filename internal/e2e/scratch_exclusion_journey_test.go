@@ -14,6 +14,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+// These canned product claims keep the scratch-staging journey on its success
+// path; the fakeagent scenario is synthetic/offline, not product evidence.
 const scratchExclusionScenario = `actions:
   - match: "Derive the scenarios this change must satisfy, then run each one against the real running product.\n\nContext:\n- branch: scratch-exclusion"
     text: "tests passed; left a scratch runner behind"
@@ -31,6 +33,7 @@ const scratchExclusionScenario = `actions:
         - name: "fakeagent: simulated end-to-end scenario"
           result: pass
           live: true
+          surface: product
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go
@@ -68,6 +71,7 @@ const scratchExclusionScenario = `actions:
         - name: "fakeagent: simulated end-to-end scenario"
           result: pass
           live: true
+          surface: product
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go

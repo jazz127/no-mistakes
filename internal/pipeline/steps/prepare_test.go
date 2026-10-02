@@ -62,7 +62,7 @@ func TestConfiguredTestAndLintSharePreparation(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(opts.CWD, ".deps", "count")); err != nil {
 			t.Fatalf("prepared dependencies unavailable during evidence turn: %v", err)
 		}
-		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["dependency check"],"testing_summary":"dependencies available","artifacts":[],"scenarios":[{"name":"user runs the configured command","result":"pass","live":true,"evidence":"dependency check passed","reason":""}],"verdict":"go"}`)}, nil
+		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["dependency check"],"testing_summary":"dependencies available","artifacts":[],"scenarios":[{"name":"user runs the configured command","result":"pass","live":true,"surface":"product","evidence":"dependency check passed","reason":""}],"verdict":"go"}`)}, nil
 	}}
 	sctx := newPreparationTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{
 		Prepare: preparationCommand(),
