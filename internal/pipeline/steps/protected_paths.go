@@ -93,14 +93,18 @@ func movedIntoScratch(sctx *pipeline.StepContext, deleted, excluded []string) ([
 	if len(deleted) == 0 || len(excluded) == 0 {
 		return nil, nil
 	}
-	tree, err := stepGitRunRaw(sctx, append([]string{"--literal-pathspecs", "ls-tree", "-z", "-l", "--full-tree", "HEAD", "--"}, deleted...)...)
-	if err != nil {
-		return nil, err
+	var tree strings.Builder
+	for _, batch := range argvBatches(deleted) {
+		out, err := stepGitRunRaw(sctx, append([]string{"--literal-pathspecs", "ls-tree", "-z", "-l", "--full-tree", "HEAD", "--"}, batch...)...)
+		if err != nil {
+			return nil, err
+		}
+		tree.WriteString(out)
 	}
 	headBlobs := map[string]string{}
 	hasRegular := false
 	linkSizes := map[int64]bool{}
-	for _, entry := range strings.Split(strings.TrimSuffix(tree, "\x00"), "\x00") {
+	for _, entry := range strings.Split(strings.TrimSuffix(tree.String(), "\x00"), "\x00") {
 		meta, file, ok := strings.Cut(entry, "\t")
 		fields := strings.Fields(meta)
 		if !ok || len(fields) != 4 || fields[1] != "blob" {

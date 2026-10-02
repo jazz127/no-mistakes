@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -917,6 +918,41 @@ func TestDocumentCommitDefersMoveIntoUnusuallyNamedScratch(t *testing.T) {
 				t.Fatalf("document commit staged half a move: %q", got)
 			}
 		})
+	}
+}
+
+func TestDocumentCommitDefersMoveBeyondTheFirstDeletionBatch(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := setupGitRepo(t)
+	vendor := filepath.Join(dir, "vendor", strings.Repeat("v", 120))
+	if err := os.MkdirAll(vendor, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 300; i++ {
+		if err := os.WriteFile(filepath.Join(vendor, fmt.Sprintf("file%03d.txt", i)), []byte(fmt.Sprintf("vendored %d\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCmd(t, dir, "add", "vendor")
+	gitCmd(t, dir, "commit", "-m", "vendor")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	if err := os.MkdirAll(filepath.Join(dir, "scratch"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(vendor, "file299.txt"), filepath.Join(dir, "scratch", "kept.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(dir, "vendor")); err != nil {
+		t.Fatal(err)
+	}
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	committed, err := commitAgentFixesWithResult(sctx, types.StepDocument, "drop vendor", "")
+	if err != nil || !committed {
+		t.Fatalf("document commit: committed=%v err=%v", committed, err)
+	}
+	deletedInCommit := strings.Split(gitCmd(t, dir, "diff", "HEAD^", "HEAD", "--name-only"), "\n")
+	if len(deletedInCommit) != 299 || slices.ContainsFunc(deletedInCommit, func(f string) bool { return strings.HasSuffix(f, "file299.txt") }) {
+		t.Fatalf("commit staged %d deletions, want 299 without the moved file", len(deletedInCommit))
 	}
 }
 
