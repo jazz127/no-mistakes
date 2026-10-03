@@ -308,11 +308,9 @@ Symptom: `no-mistakes axi status` shows an active step with `last_activity` pref
 It is only a liveness signal.
 It does not cancel the step, fail the run, or mean the pipeline is safe to bypass.
 
-A quiet Review step still ends on its own: each fixer or reviewer invocation is independently bounded by [`review_agent_timeout`](/no-mistakes/reference/global-config/#review_agent_timeout), after which the run fails with a timeout diagnostic in the step log. This is an absolute wall-clock limit, not an activity-reset idle timer: an invocation that emitted output reports measured last-activity evidence, while a no-output invocation reports its measured no-output duration. `step_quiet_warning` remains status-only.
-A quiet Test step is bounded the same way by [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout), covering the post-test evidence-gathering agent and a Test-repair turn.
-An expired Test budget parks for a decision rather than failing the run as a code defect; raise that setting when targeted tests or evidence gathering routinely approach the default 30m.
-A Review cut deliberately still fails the run rather than parking, because an approved Review park would let Push ship a half-finished, unreviewed fix; parking Review cuts as well is left to a separate follow-up.
-Every other agent-spawning step (Document, Lint, Rebase conflict repair, PR drafting, CI auto-fix) is bounded by [`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout), so a stall reaches the step's normal agent-error handling instead of remaining active until you abort. Most mutation steps fail, PR drafting continues with deterministic fallback content, and CI auto-fix parks for a user decision as described in the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci).
+Agent invocations have budgets even when the step looks quiet. The [global timeout reference](/no-mistakes/reference/global-config/#agent_timeout) owns silent budgets, optional still-working caps, and measured timeout diagnostics. Use those diagnostics to distinguish a turn that needs a larger silent budget from one that needs a still-working cap; changing `step_quiet_warning` changes only the status signal.
+
+The [Review](/no-mistakes/reference/pipeline-steps/#review), [Test](/no-mistakes/reference/pipeline-steps/#test), and [CI](/no-mistakes/reference/pipeline-steps/#ci) references explain whether a budget cut fails the run or parks for a decision, and how leftover work is handled.
 
 Start by reading the active run and the step log:
 
@@ -339,7 +337,7 @@ git worktree list
 git worktree remove --force <path>
 ```
 
-Otherwise, eligible orphan worktrees are cleaned on the next startup, subject to those same retention rules:
+Eligible leftovers under the default tree follow the [worktree retention policy](/no-mistakes/reference/global-config/#worktree). Restarting does not bypass that policy; startup also cleans eligible recorded worktrees in operator-configured roots, as described in [crash recovery](/no-mistakes/concepts/daemon/#crash-recovery):
 
 ```sh
 no-mistakes daemon stop
