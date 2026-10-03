@@ -1071,9 +1071,9 @@ type WorktreeRaw struct {
 // worktree is already removed the instant its pipeline finishes (see
 // daemon.RunManager.removeRunWorktree); this bounds what a failed removal -
 // or a protected-path refusal that later became removable - leaves behind, on
-// a long-lived daemon that may not restart for weeks (see
-// daemon.cleanupOrphanWorktrees for the crash-recovery counterpart, which
-// runs only at startup). Zero Retention disables age-based reaping and zero
+// a long-lived daemon that may not restart for weeks. daemon.reapWorktrees
+// applies this policy both at startup and after finished runs.
+// Zero Retention disables age-based reaping and zero
 // MaxRuns disables the count ceiling, matching Evidence.
 type Worktree struct {
 	Retention time.Duration

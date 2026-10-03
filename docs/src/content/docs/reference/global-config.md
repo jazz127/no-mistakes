@@ -808,9 +808,11 @@ Retention for leftover run-worktree directories under the default `<NM_HOME>/wor
 | `worktree.retention` | `string` | `24h`            | How long a leftover run worktree survives; `unlimited`/`none`/`off`/`never` or a non-positive duration disables the bound |
 | `worktree.max_runs`  | `int`    | `20`             | How many leftover worktree directories survive regardless of age; `0` disables the bound |
 
-A run's own worktree is already removed the instant its pipeline finishes, so this budget is a safety net rather than the normal path: it only ever governs the directory left behind by a `git worktree remove` failure (for example a vendored `.git` nested somewhere under a large `node_modules` tree) or a [protected-path](/no-mistakes/reference/repo-config/#protected_paths) refusal that later became removable. Without it, a leftover like that survived indefinitely on a long-running daemon that never restarts, since the crash-recovery sweep that also reclaims it (see the daemon's [worktree cleanup](/no-mistakes/concepts/daemon/#what-it-does)) runs only at startup.
+This budget applies to leftovers after the daemon's [normal worktree cleanup](/no-mistakes/concepts/daemon/#what-it-does). The daemon's [crash-recovery rules](/no-mistakes/concepts/daemon/#crash-recovery) own eligibility and preservation of active runs, protected-path refusals, and unpushed CI repairs.
 
 This reap runs after every finished run and again at daemon startup, the same cadence `test.evidence.retention` uses. Only the default `<NM_HOME>/worktrees` tree is bounded; a checkout you placed with [`worktree_roots`](#worktree_roots) is your own directory, and only the directories no-mistakes' own run records name there are ever touched, per that section's rules.
+
+Eligible directories are aged by their directory modification time. After expired directories are removed, the count bound removes the oldest survivors across all repositories in the default tree. Disabling one bound leaves the other in force; disable both to retain all eligible leftovers. An unparseable `retention` or negative `max_runs` rejects the global config.
 
 Global-only, for the same reason `test.evidence`'s local storage fields are: it governs this machine's local disk, so a repository does not get to set the retention budget for a directory every repository on the machine shares.
 
@@ -1116,7 +1118,7 @@ Reaping runs after each finished run and again at daemon startup. An upgraded da
 
 The publication fields are global defaults. Repo config can override `store_in_repo`, `attach_media`, and `dir`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
 
-`test.evidence.retention` and `test.evidence.max_runs` also bound `<NM_HOME>/logs/<run-id>` (per-run step logs), reaped on the same cadence rather than through a second config surface for the same kind of per-run diagnostic artifact.
+`test.evidence.retention` and `test.evidence.max_runs` also bound `<NM_HOME>/logs/<run-id>` (per-run step logs), reaped on the same cadence. Log age uses the newest contained file modification time, with the directory's modification time as a floor, so appending to an existing step log counts as recent activity. The age and count bounds apply separately to logs and evidence. Unrecognized log directories, pending/running runs, and CI-interrupted runs whose worktrees may hold unpushed commits are left untouched. Expired step logs become unavailable to `axi logs`; run records remain in the database. Daemon-process and CLI log files are outside this policy; see [Logging](/no-mistakes/concepts/daemon/#logging).
 
 ### eval
 

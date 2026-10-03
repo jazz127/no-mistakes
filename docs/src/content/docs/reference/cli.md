@@ -195,15 +195,6 @@ Before starting a run that may omit the section (this flag set, the global `inte
 Under the flag the PR-drafting turns receive no intent text at all and draft from the diff and commit messages only; every other step prompt keeps the full intent.
 The same omit-to-reattach rule applies to `--model`/`--effort` against an active run's [pinned Pi profile](/no-mistakes/reference/global-config/#per-run-pi-profiles); a different selection cannot change that pin.
 
-### Closing issues
-
-`--closes` declares an issue the PR fully resolves, so merging the PR closes it through GitHub's native closing keywords. Repeat it for each issue. A value is a same-repository issue number (`--closes 95`) or a cross-repository reference (`--closes owner/repo#95`); anything else, including `#95`, is rejected before a run starts. References are deduplicated case-insensitively and rendered in a deterministic order, one `Closes` line each, in the PR body's `## Issues` section (see the [PR step](/no-mistakes/reference/pipeline-steps/#pr)).
-
-`--closes` is the only way to request closure. Without it, no-mistakes never adds or infers a closing reference from the intent, commit messages, branch name, or linked issues: a PR may be partial work, so use ordinary references in your own text for that. Text the pipeline writes into the PR body never carries a live closing keyword: a reference such as `Fixes #12` in the intent or a drafted narrative is published as ``Fixes `#12` `` in an inline code span, which GitHub ignores. PR titles and commit messages are not rewritten, so a squash merge can still close an issue named after a closing keyword there.
-
-The references are persisted on the run and survive daemon restarts, fix rounds, rebases, and that run's PR-body refreshes; `no-mistakes rerun` inherits them, and its own `--closes` adds to them. They can also be passed on a plain gate push as repeated `-o no-mistakes.closes=<ref>` push options; a gate push without them starts a run with none, and its PR-body refresh drops the `## Issues` section. Reattaching with `--closes` adds references to the active run until its PR body has been composed; after that the request is refused with an explicit error rather than reported as applied. Before starting a run with `--closes`, `axi run` refuses a running daemon too old to honor it, and rejects `--closes` combined with `--skip pr` as a usage error; a run whose PR step is skipped any other way fails at that step instead (see the [PR step](/no-mistakes/reference/pipeline-steps/#pr)).
-
-`--closes` is supported on GitHub only; on another forge the PR step fails rather than publish a PR that silently closes nothing. GitHub closes the issue only when the PR merges into the repository's default branch and the issue is eligible for keyword closure; a PR merged into another branch does not close it.
 Ordinary reattachment accepts either the run's immutable submitted head or its current pipeline head, so pipeline-created fix commits do not detach an unchanged submitting worktree.
 When neither identity matches, `axi run` keeps the fresh-run path but refuses a gate push while `branch_sync` says the pipeline still owns the branch.
 That refusal returns the complete structured state and its `continue_active_run` or `recover_custody` next action instead of a raw Git non-fast-forward.
@@ -238,6 +229,16 @@ Explicit per-run skips retain their existing behavior.
 If the run also has a Test or CI approval override, `passed-with-override` takes precedence and the automatic skip causes remain visible.
 Legacy rows without a recorded skip cause keep their prior classification; their logs remain inspectable.
 When the pipeline applied fixes, they include a `fixes` table and a `help` instruction to acknowledge the misses and list those fixes for the user's review.
+
+### Closing issues
+
+`--closes` declares an issue the PR fully resolves. Repeat it for each issue. A value is a same-repository positive decimal issue number without leading zeros (`--closes 95`) or a cross-repository reference (`--closes owner/repo#95`); anything else, including `#95`, is rejected before a run starts. References are deduplicated case-insensitively and normalized into a deterministic order.
+
+The references are persisted on the run and survive daemon restarts, fix rounds, rebases, and that run's PR-body refreshes; `no-mistakes rerun` inherits them, and its own `--closes` adds to them. They can also be passed on a plain gate push as repeated `-o no-mistakes.closes=<ref>` push options; a gate push without them starts a run with none. Reattaching with `--closes` adds references until the PR step claims them for body composition; after that, new references are refused with an explicit error rather than reported as applied. Repeating references already recorded on the run remains valid after the claim. Before starting a run with `--closes`, `axi run` refuses a running daemon too old to honor it, and rejects `--closes` combined with `--skip pr` as a usage error.
+
+The [PR step](/no-mistakes/reference/pipeline-steps/#pr) owns body rendering, preservation of author text, neutralization of incidental closing text, and verification of every requested reference. It also owns the failure behavior when the forge is unsupported or PR publication would be skipped.
+
+GitHub closes the issue only when the PR merges into the repository's default branch and the issue is eligible for keyword closure; a PR merged into another branch does not close it.
 
 ### Strict launch receipts
 

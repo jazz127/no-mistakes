@@ -48,12 +48,10 @@ func worktreeReapPolicyFor(global *config.GlobalConfig) worktreeReapPolicy {
 // to reap. This exists for the uncommon path: a `git worktree remove` failure
 // (e.g. a vendored/nested .git under a large node_modules tree) or a
 // protected-path refusal that later became removable both leave a directory
-// that immediate removal never retries. cleanupOrphanWorktrees already
-// reclaims every such leftover unconditionally, but only once, at the next
-// daemon startup - on a long-lived install that can be weeks away, which is
-// exactly the "long-running host" accumulation the issue reports. Calling
-// this after every run's own cleanup (see RunManager.cleanupRunEvidence)
-// converges a live daemon on the same budget without waiting for a restart.
+// that immediate removal never retries. This policy runs both at startup and
+// after every run's own cleanup (see RunManager.cleanupRunEvidence), so a
+// long-lived daemon converges on the budget without waiting for a restart.
+// cleanupOrphanWorktrees handles operator-placed leftovers separately.
 //
 // It reuses defaultTreeOrphanWorktrees for directory discovery and
 // eligibility (never a directory whose run is still pending/running, still
