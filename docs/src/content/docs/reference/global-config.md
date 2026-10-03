@@ -549,21 +549,39 @@ For older active runs that do not yet have activity rows, AXI falls back to the 
 
 ### agent_timeout
 
-Maximum wall-clock time for one pipeline agent invocation that does not already have a more specific deadline.
+Stall budget for one pipeline agent invocation that does not already have a more specific deadline.
 This is the default-by-construction budget: Document, Lint, Rebase conflict repair, PR drafting, CI auto-fix, and any future agent-spawning step are bounded even if they forget to install their own timer.
 Review still uses [`review_agent_timeout`](#review_agent_timeout) for each review or fix invocation, Test still uses [`test_agent_timeout`](#test_agent_timeout) per invocation, and Intent keeps its five-minute extraction cap; any existing deadline is honored rather than capped.
-When this deadline expires, the agent is cancelled and the invocation returns a timeout diagnostic instead of remaining active indefinitely. Most agent-driven mutation steps fail the run, CI auto-fix parks for a user decision, and PR drafting follows its existing agent-error fallback and continues with deterministic content. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the approval behavior.
-A late successful return after the deadline is rejected, so post-agent commits and PR content cannot use work from a timed-out turn.
+A silent invocation is cancelled when this budget expires.
+An invocation that is still producing output at expiry, or whose agent subprocess is still running a child process it started after its last output, such as a test suite a tool call launched, continues only when [`agent_working_timeout`](#agent_working_timeout) is set.
+It may then continue until it goes quiet with no live child process for 10 minutes (the shipped [`step_quiet_warning`](#step_quiet_warning) default, fixed regardless of that setting; this budget itself when it is shorter) or until that cap, whichever comes first.
+With the cap unset, the turn stops at this budget.
+There is no hidden multiple of this budget.
+When the invocation is cancelled, it returns a timeout diagnostic instead of remaining active indefinitely.
+Most agent-driven mutation steps fail the run, CI auto-fix parks for a user decision, and PR drafting follows its existing agent-error fallback and continues with deterministic content.
+The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the approval behavior.
+A late successful return after cancellation is rejected, so post-agent commits and PR content cannot use work from a timed-out turn.
 
-The diagnostic identifies expiration as an **absolute wall-clock limit** and separately reports what activity was actually measured. Activity does not reset or extend the hard limit. Evidence resets whenever a retry or fallback starts a replacement attempt, including provider fallback, failed session resume, and OpenCode's prompt-only structured-output fallback, so the diagnostic describes only the attempt that reached the deadline:
+The diagnostic names which bound cut the invocation and how long it ran, and separately reports what activity was actually measured.
+With no still-working cap set it reads `after 30m0s (silent budget; no still-working cap is set; ran 30m0s)`, which claims nothing about output or child processes because nothing checked them.
+With a cap set it reads `after 30m0s (stall budget, then no recent output or live child process; ran 42m0s)` for a turn that went idle, or `at its 1h0m0s still-working cap (silent budget 30m0s; ran 1h0m0s)` for a turn that reached the cap.
+Evidence resets whenever a retry or fallback starts a replacement attempt, including provider fallback, failed session resume, and OpenCode's prompt-only structured-output fallback, so the diagnostic describes only the attempt that reached the deadline:
 
 - `agent produced no output at all in 30m0s after its subprocess started (pid=1234)` - the current attempt launched and then emitted nothing. Check that the agent CLI is authenticated and responsive.
-- `agent last produced output 4s ago (312 observed)` - the current attempt was working right up to the deadline. The turn needs a larger budget, or the request is too large for one turn.
+- `agent last produced output 4s ago (312 observed)` - the current attempt was working right up to cancellation. Set the still-working cap, raise it if it is already set, or split a request that is too large for one turn.
 - `agent produced no output at all in 30m0s and never reported a subprocess start` - the current attempt never reached a running agent process.
 
-Output means anything observable: streamed assistant text, or raw bytes on the agent subprocess's stdout or stderr. Subprocess bytes matter because an agent spends most of a long turn running tools rather than writing prose, so prose alone cannot tell a working agent from a wedged one.
-There is no activity-reset idle watchdog: [`step_quiet_warning`](#step_quiet_warning) is a separate status-only signal and does not cancel work. The absolute limit is the bounded safety policy for both active and no-output invocations.
-Any substantive report from the agent adapter - for a native agent, its exit status and captured stderr - is appended to the diagnostic as `agent reported: ...`; credential-bearing URLs are redacted and the report is length-bounded before it can reach logs or findings. A bare context cancellation is omitted because it adds no evidence.
+Output means anything observable: streamed assistant text, or raw bytes on the agent subprocess's stdout or stderr.
+Subprocess bytes matter because an agent spends most of a long turn running tools rather than writing prose, so prose alone cannot tell a working agent from a wedged one.
+A live child process of the agent subprocess extends the budget too, because a long tool call writes nothing until it returns, but it is liveness rather than output and is never reported as the agent having produced anything.
+The agent's child processes are sampled about once a second, and each output freezes a sample taken before it as the baseline; only a child missing from that baseline counts.
+A tool the agent launches right after announcing it, even in its very first output, therefore still extends the budget.
+Helpers it keeps alive for the whole turn, such as the ACP agent under `acpx` or stdio MCP servers, are in the baseline once a sample taken after they started precedes an output, so they cannot keep a hung turn alive past the stall budget.
+A helper started less than about a second before the agent's first output, with no output after it, cannot be told apart from a tool that output announced, so it counts as work and can hold a hung turn open until the still-working cap.
+Agents that report no subprocess, and hosts where the process table cannot be read, get no such extension.
+[`step_quiet_warning`](#step_quiet_warning) remains a separate status-only signal; configuring it does not change the 10-minute quiet window that cancels a previously-working turn after the stall budget.
+Any substantive report from the agent adapter - for a native agent, its exit status and captured stderr - is appended to the diagnostic as `agent reported: ...`; credential-bearing URLs are redacted and the report is length-bounded before it can reach logs or findings.
+A bare context cancellation is omitted because it adds no evidence.
 
 |         |                        |
 | ------- | ---------------------- |
@@ -572,14 +590,36 @@ Any substantive report from the agent adapter - for a native agent, its exit sta
 
 Accepts any positive Go `time.ParseDuration` string: `5m`, `30m`, `1h`, etc.
 Non-positive values are rejected when loading the global config.
-Raise it for repositories whose document, lint, rebase, PR, or CI-fix agent turns legitimately run long.
+Raise it when those turns routinely stay quiet longer than this budget.
+With [`agent_working_timeout`](#agent_working_timeout) unset, this budget also stops a turn that is still working, so set that cap when busy turns are cut here.
 It is global-only: repository config and environment variables cannot override it.
+
+### agent_working_timeout
+
+Optional cap for one invocation that is still producing output, or waiting on a live child, after [`agent_timeout`](#agent_timeout) expires.
+Unset means no extension: the turn stops at `agent_timeout`, including when it is still working.
+Set, it is the absolute deadline for that still-working turn, not a multiple of the silent budget.
+The 10-minute quiet stop still cancels a turn that goes idle before the cap.
+The value must be at least `agent_timeout`.
+[`review_agent_working_timeout`](#review_agent_working_timeout) and [`test_agent_working_timeout`](#test_agent_working_timeout) are the same cap for Review and Test.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | unset                  |
+
+Accepts any positive Go `time.ParseDuration` string.
+Non-positive values are rejected when loading the global config.
+It is global-only.
 
 ### review_agent_timeout
 
-Maximum wall-clock time for **one** Review-step agent invocation.
-The optional fixer gets the full configured limit, and its fresh, session-free independent rereviewer gets a new full limit of its own. Every later fixer and rereviewer does the same; no invocation inherits time spent by an earlier turn.
-When an invocation reaches this absolute deadline, the review agent is cancelled and the run fails with a diagnostic naming the wall-clock limit instead of remaining active indefinitely.
+Stall budget for **one** Review-step agent invocation.
+The optional fixer gets the full configured budget, and its fresh, session-free independent rereviewer gets a new full budget of its own.
+Every later fixer and rereviewer does the same; no invocation inherits time spent by an earlier turn.
+A silent invocation is cancelled when this budget expires.
+A still-working invocation continues only when [`review_agent_working_timeout`](#review_agent_working_timeout) is set, under the same idle rule as [`agent_working_timeout`](#agent_working_timeout).
+When the invocation is cancelled, the review agent fails the run with a diagnostic naming the bound that cut it instead of remaining active indefinitely.
 That diagnostic carries the same measured evidence and adapter report described under [`agent_timeout`](#agent_timeout).
 
 |         |                        |
@@ -589,13 +629,31 @@ That diagnostic carries the same measured evidence and adapter report described 
 
 Accepts any positive Go `time.ParseDuration` string: `5m`, `30m`, `1h`, etc.
 Non-positive values are rejected when loading the global config.
-Raise it for repositories whose reviews legitimately run long; it bounds only the Review step, and no other step or environment variable overrides it.
+Raise it when reviews routinely stay quiet longer than this budget.
+With [`review_agent_working_timeout`](#review_agent_working_timeout) unset, this budget also stops a review that is still working, so set that cap when busy reviews are cut here.
+It bounds only the Review step, and no other step or environment variable overrides it.
+
+### review_agent_working_timeout
+
+Optional still-working cap for one Review invocation.
+Unset means the turn stops at [`review_agent_timeout`](#review_agent_timeout).
+Set, it is that turn's absolute deadline, and it must be at least `review_agent_timeout`.
+The 10-minute quiet stop still applies.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | unset                  |
+
+It is global-only.
 
 ### test_agent_timeout
 
-Maximum wall-clock time for one Test-step agent invocation.
+Stall budget for one Test-step agent invocation.
 The budget covers the post-test evidence-gathering turn, and a Test-repair turn gets its own budget of the same length.
-When the deadline expires, the test agent is cancelled and the Test step parks for a decision with an ask-user finding rather than failing the run as a code defect.
+A silent invocation is cancelled when this budget expires.
+A still-working invocation continues only when [`test_agent_working_timeout`](#test_agent_working_timeout) is set, so a targeted run that already needs most of this budget is not failed solely because the provider was slow.
+When the invocation is cancelled, the test agent parks for a decision with an ask-user finding rather than failing the run as a code defect.
 That finding carries the same measured evidence and adapter report described under [`agent_timeout`](#agent_timeout).
 A late structured result from the expired turn is still not used as a successful Test pass.
 The park keeps the configured `commands.test` result from the same execution, so approving over a failing command is still recorded as a configured-command override.
@@ -614,9 +672,24 @@ You can also abort, raise this value, and retry.
 
 Accepts any positive Go `time.ParseDuration` string: `5m`, `30m`, `1h`, etc.
 Non-positive values are rejected when loading the global config.
-Raise it for repositories whose targeted tests or evidence gathering legitimately run long; a suite that itself takes close to 30 minutes leaves almost no slack against provider slowness under the default.
-The shipped default stays a stall bound and is not raised automatically.
+Raise it when targeted tests or evidence gathering routinely stay quiet longer than this budget.
+With [`test_agent_working_timeout`](#test_agent_working_timeout) unset, this budget also stops a Test turn that is still working, so set that cap when busy turns are cut here.
+The shipped default stays a silent bound and is not raised automatically.
 It bounds only the Test step, and no other step or environment variable overrides it.
+
+### test_agent_working_timeout
+
+Optional still-working cap for one Test invocation.
+Unset means the turn stops at [`test_agent_timeout`](#test_agent_timeout).
+Set, it is that turn's absolute deadline, and it must be at least `test_agent_timeout`.
+The 10-minute quiet stop still applies.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | unset                  |
+
+It is global-only.
 
 ### daemon_connect_timeout
 
@@ -721,6 +794,27 @@ Each run records the directory it was created in, so editing, adding, or removin
 The key is matched against the checkout path recorded at `init`. After moving a checkout, re-run `no-mistakes init` from the new path and update the key; a key that matches no registered repository is reported in the daemon log at startup and otherwise does nothing.
 
 `no-mistakes init --worktree-root <dir>` prints the exact entry to add for the checkout you are initializing. The global config is hand-maintained, so init never rewrites it for you.
+
+### worktree
+
+Retention for leftover run-worktree directories under the default `<NM_HOME>/worktrees/<repo id>/<run id>` tree.
+
+|      |          |
+| ---- | -------- |
+| Type | `object` |
+
+| Field                | Type     | Default          | Description                                                                    |
+| -------------------- | -------- | ---------------- | ------------------------------------------------------------------------------ |
+| `worktree.retention` | `string` | `24h`            | How long a leftover run worktree survives; `unlimited`/`none`/`off`/`never` or a non-positive duration disables the bound |
+| `worktree.max_runs`  | `int`    | `20`             | How many leftover worktree directories survive regardless of age; `0` disables the bound |
+
+This budget applies to leftovers after the daemon's [normal worktree cleanup](/no-mistakes/concepts/daemon/#what-it-does). The daemon's [crash-recovery rules](/no-mistakes/concepts/daemon/#crash-recovery) own eligibility and preservation of active runs, protected-path refusals, and unpushed CI repairs.
+
+This reap runs after every finished run and again at daemon startup, the same cadence `test.evidence.retention` uses. Only the default `<NM_HOME>/worktrees` tree is bounded; a checkout you placed with [`worktree_roots`](#worktree_roots) is your own directory, and only the directories no-mistakes' own run records name there are ever touched, per that section's rules.
+
+Eligible directories are aged by their directory modification time. After expired directories are removed, the count bound removes the oldest survivors across all repositories in the default tree. Disabling one bound leaves the other in force; disable both to retain all eligible leftovers. An unparseable `retention` or negative `max_runs` rejects the global config.
+
+Global-only, for the same reason `test.evidence`'s local storage fields are: it governs this machine's local disk, so a repository does not get to set the retention budget for a directory every repository on the machine shares.
 
 ### auto_fix
 
@@ -1023,6 +1117,8 @@ Reaping runs after each finished run and again at daemon startup. An upgraded da
 `local_root` must be an absolute path outside `<NM_HOME>/worktrees`; a relative or managed-worktree path fails daemon startup and prevents new or recovered runs from starting. Because `retention` bounds how long a PR body's local artifact links keep resolving, raise it rather than lowering it if your reviews run long.
 
 The publication fields are global defaults. Repo config can override `store_in_repo`, `attach_media`, and `dir`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
+
+`test.evidence.retention` and `test.evidence.max_runs` also bound `<NM_HOME>/logs/<run-id>` (per-run step logs), reaped on the same cadence. Log age uses the newest contained file modification time, with the directory's modification time as a floor, so appending to an existing step log counts as recent activity. The age and count bounds apply separately to logs and evidence. Unrecognized log directories, pending/running runs, and CI-interrupted runs whose worktrees may hold unpushed commits are left untouched. Expired step logs become unavailable to `axi logs`; run records remain in the database. Daemon-process and CLI log files are outside this policy; see [Logging](/no-mistakes/concepts/daemon/#logging).
 
 ### eval
 

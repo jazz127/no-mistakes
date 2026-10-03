@@ -1631,9 +1631,13 @@ func escapePipelineFoldMarkers(s string) string {
 // neutralizeAttestationMarkers breaks every attestation comment prefix in
 // agent-authored PR-body prose so only the pipeline-authored marker in the
 // Pipeline section stays parseable by the compliance check, which binds the
-// first marker in the body to the PR head.
+// first marker in the body to the PR head. It also breaks copied PR-appendix
+// ownership markers (e.g. Testing evidence quoting a templated body): a raw
+// pair in an ordinary body makes every later restamp refuse it as ambiguous.
+// And it neutralizes closing references (neutralizeClosingReferences), since
+// every PR-body site that generates text passes through here.
 func neutralizeAttestationMarkers(s string) string {
-	return strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix)
+	return neutralizeClosingReferences(escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix)))
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {
