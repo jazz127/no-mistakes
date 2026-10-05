@@ -706,6 +706,7 @@ Version discovery reads a `channels.json` manifest from the GitHub release-asset
 If the daemon is running from a different executable path, update still prompts before replacing it; pass `-y`/`--yes` to answer that prompt non-interactively.
 If the daemon executable path cannot be determined, the update aborts before replacement.
 If the daemon does not come back cleanly after a successful replacement, the command reports that failure.
+When the running binary resolves into `/nix/store`, update prints that self-update is unavailable for Nix installs and exits without a version check; upgrade through Nix instead (see [Installation](/no-mistakes/start-here/installation/#nix)).
 On macOS, removes the quarantine extended attribute.
 [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping)
 owns the active-run guard, the scope of `--force` and `--yes`, and recursive
@@ -713,7 +714,7 @@ validation-step containment.
 
 Because `update` installs the latest official release binary, the replacement binary includes the default self-hosted telemetry host and website ID. Disable telemetry with `NO_MISTAKES_TELEMETRY=0`, or override the host and website ID with `NO_MISTAKES_UMAMI_HOST` and `NO_MISTAKES_UMAMI_WEBSITE_ID`.
 
-Background update checks run automatically on each CLI invocation (except `update` itself and version queries `--version` / `-v`, which stay side-effect-free). If a newer version is available, a notification is printed to stderr. Suppressed for dev builds or when `NO_MISTAKES_NO_UPDATE_CHECK=1` is set.
+For background update checks, notifications, and suppression rules, see [`NO_MISTAKES_NO_UPDATE_CHECK`](/no-mistakes/reference/environment/#no_mistakes_no_update_check).
 
 ## no-mistakes daemon start
 

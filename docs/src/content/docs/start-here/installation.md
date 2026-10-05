@@ -33,6 +33,38 @@ go install github.com/kunchenguid/no-mistakes/cmd/no-mistakes@latest
 
 `go install` builds the CLI without an embedded telemetry website ID, so telemetry stays off by default unless you later set `NO_MISTAKES_UMAMI_WEBSITE_ID` at runtime.
 
+## Nix
+
+```sh
+nix run github:kunchenguid/no-mistakes -- --version
+nix profile install github:kunchenguid/no-mistakes
+no-mistakes daemon restart
+```
+
+The flake builds for `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`.
+Intel macOS is not covered because nixpkgs dropped `x86_64-darwin`; use the install script or `go install` there.
+
+To add it to a [devenv](https://devenv.sh) shell, declare the flake as an input in `devenv.yaml` and add its package:
+
+```yaml
+inputs:
+  no-mistakes:
+    url: github:kunchenguid/no-mistakes
+```
+
+```nix
+{ pkgs, inputs, ... }:
+{
+  packages = [ inputs.no-mistakes.packages.${pkgs.stdenv.system}.default ];
+}
+```
+
+Without flakes, `default.nix` exposes the same packages through flake-compat, for example `nix-build -A packages.x86_64-linux.default`.
+
+For the flake's telemetry defaults and runtime controls, see the [environment reference](/no-mistakes/reference/environment/#no_mistakes_umami_website_id).
+
+Upgrade through Nix (for example `nix profile upgrade no-mistakes` or a flake input update), then run `no-mistakes daemon restart`. The restart points the managed service at the new store path; until then the daemon keeps running the old one, which garbage collection can delete. See the [CLI reference](/no-mistakes/reference/cli/#no-mistakes-update) for the self-update restriction and the [environment reference](/no-mistakes/reference/environment/#no_mistakes_no_update_check) for background-check behavior.
+
 ## From source
 
 ```sh
@@ -82,7 +114,8 @@ If the running daemon was started from a different binary, the update still prom
 If the daemon executable path cannot be determined, the update aborts before replacing the binary.
 If the daemon does not come back cleanly after a successful replacement, the new binary stays installed but the command reports the daemon reset failure.
 
-Background update checks run automatically on each CLI invocation (except `update` itself and version queries `--version` / `-v`, which stay side-effect-free). Suppress with `NO_MISTAKES_NO_UPDATE_CHECK=1`.
+For background update checks and their suppression rules, see [`NO_MISTAKES_NO_UPDATE_CHECK`](/no-mistakes/reference/environment/#no_mistakes_no_update_check).
+A [Nix install](#nix) upgrades through Nix instead.
 
 ## Remove from a repo
 

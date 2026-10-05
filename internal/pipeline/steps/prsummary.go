@@ -1413,7 +1413,10 @@ func buildFixResultText(rounds []*db.StepRound) string {
 // mentally replaying rounds.
 func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlavor) string {
 	var inner strings.Builder
-	if len(rounds) == 0 {
+	// A skipped step whose rounds recorded no findings never checked
+	// anything, so "No issues found" under a "skipped" summary would
+	// claim a pass.
+	if len(rounds) == 0 || (sr.Status == types.StepStatusSkipped && !roundsHaveFindings(rounds)) {
 		writeStepStatusDetail(&inner, sr, flavor)
 		return foldPRBlock(summaryLine, inner.String(), flavor)
 	}
@@ -1732,6 +1735,8 @@ func severityEmoji(severity string) string {
 
 func stepDisplayName(name types.StepName) string {
 	switch name {
+	case types.StepIntent:
+		return "Intent"
 	case types.StepRebase:
 		return "Rebase"
 	case types.StepReview:
