@@ -61,9 +61,9 @@ inputs:
 
 Without flakes, `default.nix` exposes the same packages through flake-compat, for example `nix-build -A packages.x86_64-linux.default`.
 
-The flake embeds the same default telemetry host and website ID as official release binaries. Disable telemetry with `NO_MISTAKES_TELEMETRY=0`, or override the host and website ID with `NO_MISTAKES_UMAMI_HOST` and `NO_MISTAKES_UMAMI_WEBSITE_ID`.
+For the flake's telemetry defaults and runtime controls, see the [environment reference](/no-mistakes/reference/environment/#no_mistakes_umami_website_id).
 
-`no-mistakes update` refuses to run on a binary in the Nix store, and the background update notice stays off. Upgrade through Nix (for example `nix profile upgrade no-mistakes` or a flake input update), then run `no-mistakes daemon restart`. The restart points the managed service at the new store path; until then the daemon keeps running the old one, which garbage collection can delete.
+Upgrade through Nix (for example `nix profile upgrade no-mistakes` or a flake input update), then run `no-mistakes daemon restart`. The restart points the managed service at the new store path; until then the daemon keeps running the old one, which garbage collection can delete. See the [CLI reference](/no-mistakes/reference/cli/#no-mistakes-update) for the self-update restriction and the [environment reference](/no-mistakes/reference/environment/#no_mistakes_no_update_check) for background-check behavior.
 
 ## From source
 
@@ -114,7 +114,7 @@ If the running daemon was started from a different binary, the update still prom
 If the daemon executable path cannot be determined, the update aborts before replacing the binary.
 If the daemon does not come back cleanly after a successful replacement, the new binary stays installed but the command reports the daemon reset failure.
 
-Background update checks run automatically on each CLI invocation (except `update` itself and version queries `--version` / `-v`, which stay side-effect-free). Suppress with `NO_MISTAKES_NO_UPDATE_CHECK=1`.
+For background update checks and their suppression rules, see [`NO_MISTAKES_NO_UPDATE_CHECK`](/no-mistakes/reference/environment/#no_mistakes_no_update_check).
 A [Nix install](#nix) upgrades through Nix instead.
 
 ## Remove from a repo

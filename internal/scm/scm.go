@@ -157,8 +157,9 @@ func detectLegacyProviderHost(host string) Provider {
 
 // ResolveHost returns the canonical host for a remote. For SSH remotes it
 // honors HostName mappings from the user's SSH configuration while preserving
-// the original remote URL for all Git operations. The SSH-over-HTTPS endpoints
-// ssh.github.com and altssh.gitlab.com are returned as github.com and gitlab.com.
+// the original remote URL for all Git operations. A successful SSH lookup of
+// ssh.github.com or altssh.gitlab.com returns github.com or gitlab.com instead;
+// a failed or empty lookup retains the literal remote host.
 func ResolveHost(ctx context.Context, remote string) string {
 	return resolveHost(ctx, remote, lookupSSHHostname)
 }
