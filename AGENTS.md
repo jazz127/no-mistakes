@@ -60,6 +60,7 @@ Safest local verification sequence after non-trivial changes:
 
 - Pipeline-step tests put the non-race `internal/pipeline/fakecli` helper on PATH as `gh`/`glab`/`git`, and use `internal/testgit.RealGit` for the real binary. Never re-exec the race-instrumented test binary as those names.
 - CI-monitor tests live in `internal/pipeline/steps/citest`; keep both packages under `go test ./...`, not behind the `e2e` tag.
+- Any `go.mod`/`go.sum` change must recompute `vendorHash` in `package.nix` (set it to `lib.fakeHash`, run `nix build`, copy the `got:` hash); the `Nix flake` workflow fails otherwise and names the hash.
 - The rest is owned by the `testing-conventions` skill.
 
 **The Review Conversation (`internal/reviewqa`, `internal/pipeline/steps/review_questions.go`)**
