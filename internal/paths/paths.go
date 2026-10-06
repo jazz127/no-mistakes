@@ -120,7 +120,9 @@ func (p *Paths) EvidenceRoot(configured string) string {
 	return p.EvidenceDir()
 }
 
-// ValidateEvidenceRoot rejects configured evidence roots inside managed worktrees.
+// ValidateEvidenceRoot keeps publishable evidence out of managed worktrees and
+// separate from private logs, including filesystem aliases. A root containing
+// logs is refused too, because publication walks the evidence tree recursively.
 func (p *Paths) ValidateEvidenceRoot(configured string) error {
 	root := p.EvidenceRoot(configured)
 	worktrees := p.WorktreesDir()

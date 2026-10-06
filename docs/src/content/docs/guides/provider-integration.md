@@ -321,13 +321,8 @@ PR retargeting are optional capabilities the plugin declares in `status`.
 
 - Fork PR routing, review-bot findings, transient-check reruns, and `--closes`
 
-no-mistakes validates every plugin answer - PR identity, URL shape, check
-buckets, and merged-proof head - and fails closed on anything malformed, on a
-protocol version mismatch, and on a timeout, so a buggy plugin cannot open a
-duplicate PR, certify the wrong commit, or turn a broken integration into a
-skipped step. A plugin that reports it cannot serve the repository (for
-example, not authenticated) skips the PR and CI steps with its message, like
-a built-in provider whose CLI is logged out. The
+The [protocol's failure handling](/no-mistakes/reference/provider-plugin-protocol/#failing-closed)
+explains which plugin failures skip, fail, or retry, including CI timeout exceptions. The
 [global config reference](/no-mistakes/reference/global-config/#provider_plugins)
 owns host matching, precedence, and the trust boundary: plugins are global-only
 and a repository can never configure one.

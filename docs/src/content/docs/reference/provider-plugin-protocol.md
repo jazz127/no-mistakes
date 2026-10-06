@@ -49,14 +49,15 @@ no-mistakes-ssm --profile work pr view 7 --plugin=ssm --repo=my-project/my-repo 
   soon as the process exits. Read it during the call; do not keep the path. A
   body can therefore exceed argv limits, survive Windows `.cmd` shims (which
   cut arguments at the first newline), contain lines starting with `-`, and
-  never appear in a process listing. No secrets are passed in argv.
+  never appear in a process listing.
 - **Environment and working directory.** The plugin inherits the run's
   environment - the daemon's login-shell environment plus any forge-profile
   overlay - exactly like built-in provider CLIs, and runs with the run
   worktree as its working directory. Do not trust files in the worktree: they
   come from the pushed branch.
 - **Timeout.** Each invocation is bounded by `timeout` (default `2m`). On
-  expiry the process tree is killed and the operation fails closed.
+  expiry the process tree is killed; [failure handling](#failing-closed)
+  distinguishes one-shot operations from CI polling and log retrieval.
 - **Limits.** Stdout is capped at 1 MiB (4 MiB for `pr check-logs`); larger
   output fails the call. Only the first 64 KiB of stderr is kept.
   Plugin-supplied messages are credential-redacted and capped at 4 KiB before
@@ -136,10 +137,12 @@ the CI step does not poll or repair again after a malformed `pr checks`,
 exceptions, both of which never count as a pass: one during the CI step's
 repeated `pr view`, `pr checks`, or `pr mergeability` polls is retried like
 any failed read, and a timed-out `pr check-logs` lets the repair proceed
-with the logs marked unavailable. A timeout anywhere else, including the CI
-step's one-time read of the PR's live base branch, fails closed. Any other
-failure of a subcommand after `status` fails or parks the step the same way
-a built-in provider's failure does; it is never read as an empty answer.
+with the logs marked unavailable. A timeout anywhere else fails closed.
+The CI step's one-time read of the PR's live base branch also fails on every
+ordinary error, before monitoring or repair; it never substitutes the configured
+base for a failed live read. Other ordinary failures of subcommands after
+`status` fail or park the step the same way a built-in provider's failure does;
+they are never read as empty answers.
 
 ## Objects
 
@@ -265,8 +268,10 @@ Print the logs of the named failed checks.
 - **args:** `<number> --failed [--branch=<branch>] [--head-sha=<sha>] --check=<name> [--check=<name> ...]`
 - **result:** `{ "logs": "..." }` (use `""` when there are none; a missing key fails)
 
-`--failed` is always passed in protocol version 1. The CI auto-fix prompt
-keeps the last 1 MiB, where build and test failures are reported.
+`--failed` is always passed in protocol version 1. The adapter keeps the last
+1 MiB of returned logs, where build and test failures are reported. The
+[CI step](/no-mistakes/reference/pipeline-steps/#ci) applies its smaller shared
+log-evidence budget before sending them to the repair agent.
 
 ### pr merged (capability `merged_proof`)
 

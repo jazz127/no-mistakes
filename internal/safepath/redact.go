@@ -4,10 +4,10 @@
 // It guarantees nothing on its own about what no-mistakes publishes: coverage
 // is exactly the set of publication boundaries that call it. Today that is the
 // pull request title and body (PRStep.buildPRContent). Agent-authored commit
-// subjects, which reach the remote through the auto-fix commit path
-// (commitAgentFixes -> Commit.RenderFixMessage), are a separate surface with a
-// different rendering and are deliberately not covered; so is the opt-in
-// evidence branch, which copies artifact files verbatim.
+// subjects and configured trailers, which reach the remote through the auto-fix
+// commit path (Commit.RenderFixMessage and Commit.RenderTrailers), are a separate
+// surface with a different rendering and are deliberately not covered; so is
+// the opt-in evidence branch, which copies artifact files verbatim.
 //
 // It is the path analogue of internal/safeurl: safeurl keeps credentials out of
 // published text, safepath keeps the operator's home directory out of it. Route

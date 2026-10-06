@@ -449,7 +449,7 @@ Extra review guidance, scoped to the paths a change actually touches.
 | | |
 |---|---|
 | Type | `object[]` with `path` (`string`) and `instructions` (`string`, multiline) |
-| Default | Empty (built-in review instructions only) |
+| Default | Empty (no repository path rules) |
 
 Use this for house rules that only apply to part of the tree, for example a redaction rule for the code that builds remote URLs, or a note that a documentation directory needs no test coverage:
 
@@ -482,7 +482,7 @@ Two entries with the same `path` **and** the same `instructions` are injected on
 Matching runs against the full changed-file list and is deliberately **not** filtered by `ignore_patterns`: that field is read from the pushed branch, so filtering here would let a contributor drop one of your rules from the review of their own branch.
 
 Blocks augment the built-in review instructions; they cannot disable them, and a finding the reviewer raises from a block goes through the same severity and action model as any other finding.
-With nothing configured, or nothing matching the change, the review prompt is exactly what it would be without this setting.
+With nothing configured here, or nothing matching the change, this field adds nothing to the review prompt; any [machine-local rules](#machine-local-rules) still apply.
 The step log names the rules it applied and the rules that matched nothing, so a rule that never fires is visible in `no-mistakes axi logs --step review`.
 
 #### Limits and validation

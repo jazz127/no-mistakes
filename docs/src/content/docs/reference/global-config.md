@@ -540,7 +540,7 @@ provider_plugins:
 | `timeout` | no | Bound for one plugin invocation (Go duration). Defaults to `2m`. |
 | `draft_pull_requests` | no | Passes `--draft` to `pr create`. Defaults to `false`. |
 
-Names are 1-63 lowercase letters, digits, `-`, or `_` and must not reuse a built-in provider name. A run's provider shows up as `plugin:<name>`.
+Names are 1-63 lowercase letters, digits, `-`, or `_`, must start with a letter or digit, and must not reuse a built-in provider name. A run's provider shows up as `plugin:<name>`.
 
 Selection happens per run, before built-in detection and forge profiles: the remote's literal host token is matched first, then its SSH `HostName` resolution. An exact pattern beats a wildcard, and a longer wildcard beats a shorter one. Two plugins (or one plugin twice) may not list the same pattern, and a host that a [`forge_profiles`](#forge_profiles) entry claims may not also be claimed by a plugin; both are configuration errors. Because a forge profile matches the remote's literal host while a plugin also matches its SSH `HostName`, an overlap that only appears after alias resolution (a profile keyed by an SSH alias whose `HostName` a plugin claims) is refused when the run starts, with an error naming both.
 
@@ -561,7 +561,7 @@ Accepts any Go `time.ParseDuration` string: `30m`, `2h`, `4h30m`, etc.
 
 This is an idle timeout, not an absolute deadline: every time the base branch advances, the monitor re-arms it.
 So an actively-updated green PR keeps its monitor no matter how long it stays open.
-If it later develops an actual merge conflict (on GitHub, GitLab, Forgejo, Azure DevOps, or a provider plugin declaring `mergeable_state`), the CI auto-fix path rebases it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and publishes it through Push, while a clean behind PR needs no command.
+If it later develops an actual merge conflict, the [CI repair policy](/no-mistakes/reference/pipeline-steps/#ci) determines integration, revalidation, and publication; a clean behind PR needs no command.
 A genuinely idle/abandoned PR still parks at an approval gate after the timeout elapses.
 While that CI gate is parked, the daemon continues bounded read-only PR-state checks.
 If the PR is merged or closed externally, the stale gate completes automatically; an open, unknown, or temporarily unreachable PR remains parked for a user decision.
@@ -1247,7 +1247,7 @@ no-mistakes reaps its recorded run directories itself rather than relying on an 
 
 Reaping runs after each finished run and again at daemon startup. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
 
-`local_root` must be an absolute path outside `<NM_HOME>/worktrees`; a relative or managed-worktree path fails daemon startup and prevents new or recovered runs from starting. Because `retention` bounds how long a PR body's local artifact links keep resolving, raise it rather than lowering it if your reviews run long.
+`local_root` must be an absolute path outside `<NM_HOME>/worktrees` and must not equal, contain, or sit inside `<NM_HOME>/logs`. Placement checks resolve symlinks, including existing ancestors of paths not yet created, and recognize filesystem aliases such as case variants on case-insensitive volumes. These restrictions keep publishable evidence separate from private logs and configuration snapshots. An invalid placement fails daemon startup and prevents new or recovered runs from starting. Because `retention` bounds how long a PR body's local artifact links keep resolving, raise it rather than lowering it if your reviews run long.
 
 The publication fields are global defaults. Repo config can override `store_in_repo`, `attach_media`, and `dir`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
 
