@@ -298,6 +298,12 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	if stepsCommand.name == "" {
 		t.Fatal("Windows tests must run ./internal/pipeline/steps/... on its own shard")
 	}
+	// The expanded steps suite exhausted 15m on Windows while healthy tests
+	// were still queued (run 37423837514). Keep completion headroom without
+	// losing the earlier assertion that Go times out before the job does.
+	if timeout := goTestTimeout(t, stepsCommand); timeout < 20*time.Minute {
+		t.Fatalf("Windows steps timeout = %s, want at least 20m so the expanded suite can finish", timeout)
+	}
 	if gitCommand.name == "" {
 		t.Fatal("Windows tests must keep a git-heavy remainder shard besides pipeline/steps")
 	}

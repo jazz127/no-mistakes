@@ -173,6 +173,9 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		return nil, err
 	}
 	forgeCtx, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
+	if err == nil {
+		err = forgecontext.RefuseProviderPluginOverlap(ctx, forgeCtx, cfg.ProviderPlugins, repo.UpstreamURL)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve forge profile: %w", err)
 	}
@@ -247,6 +250,9 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
 	cfg := config.MergeForRemote(globalCfg, effectiveRepoCfg, repo.UpstreamURL)
+	if err := cfg.Review.ValidatePathInstructionsBudget(); err != nil {
+		return nil, err
+	}
 	// Gates are read back from the run, never re-resolved. Everything else here
 	// is deliberately re-read from the live default branch, but a gate decides
 	// which steps the run HAS: the default branch may have gained or lost one
@@ -1572,6 +1578,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		slog.Info("repo commands/agent loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
 	}
 	cfg := config.MergeForRemote(globalCfg, effectiveRepoCfg, repo.UpstreamURL)
+	if err := cfg.Review.ValidatePathInstructionsBudget(); err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("review_path_instructions_budget")
+		return "", err
+	}
 	if run.PiProfile != nil {
 		if err := cfg.ValidatePiProfileAgents(); err != nil {
 			m.db.UpdateRunError(run.ID, err.Error())
@@ -1596,6 +1607,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}
 	}
 	forgeCtx, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
+	if err == nil {
+		err = forgecontext.RefuseProviderPluginOverlap(ctx, forgeCtx, cfg.ProviderPlugins, repo.UpstreamURL)
+	}
 	if err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("resolve forge profile: %s", err))
 		trackStartFailure("resolve_forge_profile")

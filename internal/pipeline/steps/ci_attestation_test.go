@@ -397,7 +397,7 @@ func TestCIStep_PublishRepairRebindsAttestationAcrossRepairPushes(t *testing.T) 
 	f.sctx.Ctx = context.Background()
 	writeCIFix(f.dir)
 
-	repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check")
+	repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check", nil)
 	if err != nil {
 		t.Fatalf("commitRepair: %v\nlog:\n%s", err, f.log())
 	}
@@ -469,7 +469,7 @@ func TestCIStep_PublishRepairFailsWhenAttestationCannotSettle(t *testing.T) {
 	f.sctx.Ctx = context.Background()
 	writeCIFix(f.dir)
 
-	repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check")
+	repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check", nil)
 	if err == nil || !strings.Contains(err.Error(), "failed after 3 attempts") {
 		t.Fatalf("commitRepair error = %v, want unsettled attestation failure", err)
 	}
@@ -499,7 +499,7 @@ func TestCIStep_PublishRepairSkipsAttestationForNonGitHubProvider(t *testing.T) 
 	f.sctx.Run.PRURL = &gitlabPR
 	writeCIFix(f.dir)
 
-	repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check")
+	repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check", nil)
 	if err != nil {
 		t.Fatalf("commitRepair: %v\nlog:\n%s", err, f.log())
 	}
@@ -530,7 +530,7 @@ func TestCIStep_PublishRepairDoesNotMintAttestation(t *testing.T) {
 	f.sctx.Ctx = context.Background()
 	writeCIFix(f.dir)
 
-	repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check")
+	repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check", nil)
 	if err != nil {
 		t.Fatalf("commitRepair: %v\nlog:\n%s", err, f.log())
 	}

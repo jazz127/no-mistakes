@@ -69,6 +69,11 @@ forge_profiles:
   gitlab-work:
     glab_config_dir: ~/.config/glab-work
 
+provider_plugins:
+  ssm:
+    command: ~/bin/nm-ssm-plugin
+    hosts: ["*.sourcemanager.dev"]
+
 auto_fix:
   rebase: 3
   review: 0
@@ -84,12 +89,17 @@ ci:
 rebase:
   strategy: rebase # or: merge
 
+review:
+  path_instructions: []
+
 commit:
   fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
   # branch_pattern: '^PROJ/([0-9]+)$'
   # branch_replacement: 'PROJ-${1}'
   # To use the captured identifier in the subject:
   # fix_message: "{{.Branch}}: {{.Summary}}"
+  # trailers:
+  #   - "Assisted-by: no-mistakes:{{.Agent}}:{{.Model}}"
 
 intent:
   enabled: true
@@ -508,9 +518,39 @@ Deliberate scope boundaries, so profiles never duplicate what other layers own:
 - **Executable selection stays with the machine.** Which `gh`, `glab`, or `git` runs is owned by `PATH` and the existing command resolution, not by profile configuration.
 - **Credential-helper context stays with Git configuration.** Profiles point at provider CLI config directories and never model or store credential material; credentials remain in the CLI's own store.
 
+### provider_plugins
+
+Optional machine-local PR and CI support for hosts no-mistakes does not ship a provider for, such as a company-internal forge or Google Cloud Secure Source Manager. Each entry names an AXI-shaped CLI that implements the [provider plugin protocol](/no-mistakes/reference/provider-plugin-protocol/) and the hosts it serves:
+
+```yaml
+provider_plugins:
+  ssm:
+    command: ~/bin/nm-ssm-plugin
+    args: ["--location", "us-central1"]
+    hosts: ["*.sourcemanager.dev"]
+    timeout: 2m
+    draft_pull_requests: false
+```
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `command` | yes | Executable to run. A bare name is resolved from the run's `PATH`; a path must be absolute or begin with `~/`. Relative paths are refused because plugins run with the run worktree as their working directory. |
+| `args` | no | Arguments passed verbatim on every invocation, before the subcommand words (`<command> <args...> pr view 7 ... --json`). PR bodies travel in a private `--body-file`, never in argv, so they never appear in a process listing. |
+| `hosts` | yes | Host patterns the plugin claims: an exact host name or SSH alias as it appears in the remote, or `*.<domain>` for any subdomain (not the apex). No scheme, port, path, or user. |
+| `timeout` | no | Bound for one plugin invocation (Go duration). Defaults to `2m`. |
+| `draft_pull_requests` | no | Passes `--draft` to `pr create`. Defaults to `false`. |
+
+Names are 1-63 lowercase letters, digits, `-`, or `_`, must start with a letter or digit, and must not reuse a built-in provider name. A run's provider shows up as `plugin:<name>`.
+
+Selection happens per run, before built-in detection and forge profiles: the remote's literal host token is matched first, then its SSH `HostName` resolution. An exact pattern beats a wildcard, and a longer wildcard beats a shorter one. Two plugins (or one plugin twice) may not list the same pattern, and a host that a [`forge_profiles`](#forge_profiles) entry claims may not also be claimed by a plugin; both are configuration errors. Because a forge profile matches the remote's literal host while a plugin also matches its SSH `HostName`, an overlap that only appears after alias resolution (a profile keyed by an SSH alias whose `HostName` a plugin claims) is refused when the run starts, with an error naming both.
+
+`provider_plugins` is global-only. A plugin runs with your credentials for every repository on its hosts, so a repository `.no-mistakes.yaml` can never add, change, or redirect one; a `provider_plugins` block there is ignored.
+
+Plugins run through the same environment as built-in provider CLIs (the daemon's login-shell environment plus any forge-profile overlay) with the run worktree as the working directory. A plugin whose `status` exits non-zero (for example, not authenticated) makes the PR and CI steps skip with its message, reported under `run.automatic_skips`; a plugin that breaks the protocol (unreadable output, wrong protocol version, timeout) fails the step instead, in its `status` handshake or in any later call (a timeout during the CI step's repeated polls or log retrieval is handled like any failed read instead). `no-mistakes doctor` lists configured plugins and checks that each command resolves; it does not run the plugin, because the handshake is per repository.
+
 ### ci_timeout
 
-How long the CI step monitors an open PR, including provider CI status and on GitHub, GitLab, Forgejo, or Azure DevOps PR mergeability, before giving up.
+How long the CI step monitors an open PR, including provider CI status and PR mergeability (on GitHub, GitLab, Forgejo, Azure DevOps, or a provider plugin declaring `mergeable_state`), before giving up.
 
 |         |                                                 |
 | ------- | ----------------------------------------------- |
@@ -521,7 +561,7 @@ Accepts any Go `time.ParseDuration` string: `30m`, `2h`, `4h30m`, etc.
 
 This is an idle timeout, not an absolute deadline: every time the base branch advances, the monitor re-arms it.
 So an actively-updated green PR keeps its monitor no matter how long it stays open.
-If it later develops an actual GitHub, GitLab, Forgejo, or Azure DevOps merge conflict, the CI auto-fix path rebases it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and publishes it through Push, while a clean behind PR needs no command.
+If it later develops an actual merge conflict, the [CI repair policy](/no-mistakes/reference/pipeline-steps/#ci) determines integration, revalidation, and publication; a clean behind PR needs no command.
 A genuinely idle/abandoned PR still parks at an approval gate after the timeout elapses.
 While that CI gate is parked, the daemon continues bounded read-only PR-state checks.
 If the PR is merged or closed externally, the stale gate completes automatically; an open, unknown, or temporarily unreachable PR remains parked for a user decision.
@@ -833,7 +873,7 @@ For empty `commands.lint`, the document step's combined housekeeping pass also a
 | `auto_fix.test`     | `int` | `3`     | Test failure auto-fix attempts                                                              |
 | `auto_fix.document` | `int` | `3`     | Not used by the automatic document pass                                                     |
 | `auto_fix.lint`     | `int` | `3`     | Lint issue auto-fix attempts                                                                |
-| `auto_fix.ci`       | `int` | `3`     | CI auto-fix attempts for CI failures, plus GitHub, GitLab, Forgejo, and Azure DevOps merge conflicts |
+| `auto_fix.ci`       | `int` | `3`     | CI auto-fix attempts for CI failures, plus merge conflicts on GitHub, GitLab, Forgejo, Azure DevOps, and provider plugins declaring `mergeable_state` |
 
 Legacy alias: `auto_fix.babysit`.
 
@@ -891,6 +931,39 @@ rebase:
 ```
 
 A value in the trusted repository config overrides this global value in both directions. When the trusted repository config omits the key, this global value applies. An unrecognized value fails the config closed rather than falling back to the default, so a typo cannot quietly keep rewriting history a maintainer asked to stop rewriting.
+
+### review.path_instructions
+
+Machine-local review guidance that applies to every repository this machine gates.
+Use it for house rules you hold in every repository, including ones you do not control and so cannot commit a [`review.path_instructions`](/no-mistakes/reference/repo-config/#reviewpath_instructions) to.
+For a rule that holds in one repository only, use a matching [`repository_overrides`](#repository_overrides) entry instead.
+
+| | |
+|---|---|
+| Type | `object[]` with `path` (`string`) and `instructions` (`string`, multiline) |
+| Default | Empty |
+
+```yaml
+review:
+  path_instructions:
+    - path: "**/*.vue"
+      instructions: |
+        Repeated instances of a component are driven from a computed, not stacked v-ifs.
+```
+
+Entries match, render, and validate exactly like the repository field, whose reference owns those rules.
+They only add guidance: the repository's own trusted rules always apply alongside them, and nothing here can remove or replace one.
+The reviewer receives each source as its own section, in this order: this global list, then the matching `repository_overrides` entry's list, then the repository's trusted list.
+The two machine-local headings say the rules come from the operator's global config and not from the repository, so a machine-local rule never reads as the repository's own.
+The step log names the source of every rule it applied or skipped.
+
+The entry and byte limits apply to the combined set from all three sources, because they share one review prompt.
+This global list together with each `repository_overrides` list is checked when the config loads.
+The repository's trusted list changes independently, so the combined set is checked again when each run starts and when a run is recovered after a daemon restart: a run whose combined rules exceed a limit fails before any step runs or resumes, with an error naming each source's entry count, rather than silently dropping a rule.
+Shorten or remove your machine-local entries to fix it.
+
+Only `path_instructions` is accepted under this block. `review.conversation` stays a repository decision, because an open question parks the gate.
+Changes apply to the next run, and to a run recovered after a daemon restart, which re-reads this file.
 
 ### commit.fix_message
 
@@ -959,10 +1032,46 @@ Malformed replacement syntax fails configuration loading with an actionable erro
 The expanded identifier is subject to the existing UTF-8, control-character, unsafe-Unicode, and rendered-subject validation.
 A `commit.branch_pattern` in `.no-mistakes.yaml` takes precedence and clears any inherited machine-wide replacement, including one from a matching repository override, so a replacement cannot be applied to a different pattern.
 
+### commit.trailers
+
+Git trailers appended to each commit made from a single agent invocation's changes, naming the agent and model that produced them.
+
+| | |
+| --- | --- |
+| Type | `list` of `string` templates |
+| Default | Unset, so commits carry no trailers |
+
+Each entry renders to one trailer line. It supports literal text and two Go-style placeholders:
+
+| Variable | Value |
+| --- | --- |
+| `{{.Agent}}` | The agent that actually ran the invocation; with an `agent` fallback list, the one that answered, not the first configured |
+| `{{.Model}}` | The model the agent reported serving the invocation, or `unknown` when it reports none |
+
+For example, this renders `Assisted-by: no-mistakes:codex:gpt-5.5` on a fix made by Codex after a fallback from Claude:
+
+```yaml
+commit:
+  trailers:
+    - "Co-Authored-By: no-mistakes {{.Agent}} <noreply@example.com>"
+    - "Assisted-by: no-mistakes:{{.Agent}}:{{.Model}}"
+```
+
+`{{.Agent}}` and `{{.Model}}` come from agent output, so each is cut to its first whitespace-separated token, reduced to letters, digits, and `-_.:/`, and limited to 64 bytes; a value with nothing left renders as `unknown`.
+Claude, Codex, Grok, and Pi report the model they served; other agents render `unknown`.
+Every entry must render to a `Key: value` line that git recognizes as a trailer.
+The key must be literal: an entry starts with its full `Key: ` prefix as plain text, and placeholders are allowed only in the value after it, so `{{.Agent}}-assisted: yes` is rejected.
+Entries are limited to 1,024 bytes and 16 placeholders, the list to 16 entries, and the same template restrictions and unsafe-character rules as `commit.fix_message` apply.
+The 1,024-byte limit also applies to the rendered line, checked when configuration loads with every placeholder at its 64-byte maximum, so an entry that loads cannot overflow at commit time.
+An invalid entry fails configuration loading, and a render failure at commit time leaves the changes unstaged.
+
+Trailers are added to Review, Test, Document, and Lint fix commits, operator-authorized repository gate repairs, and CI repair commits. Commits that no single invocation produced get none rather than a guessed agent: the Push step's catch-all commit, a CI repair retried after a protected-path refusal, and rebase or merge commits that an agent writes itself.
+A per-repo [`commit.trailers`](/no-mistakes/reference/repo-config/#committrailers) list or a matching [`repository_overrides`](#repository_overrides) entry replaces this list rather than extending it; an empty list clears it.
+
 ### repository_overrides
 
 Machine-local settings scoped to one repository by remote host and full repository path.
-This lets one machine add checks, lower command scheduling priority, or apply ticket conventions without adding settings to that repository.
+This lets one machine add checks, lower command scheduling priority, add review and documentation guidance, or apply ticket conventions without adding settings to that repository.
 Remote hosts are matched case-insensitively.
 HTTP, HTTPS, SSH, and Git-protocol URLs, plus scp-style remotes, are accepted; the transport scheme is not part of the match.
 A URL's scheme-default port (80, 443, 22, or 9418 for HTTP, HTTPS, SSH, or Git) matches an omitted port; non-default ports remain distinct.
@@ -982,11 +1091,35 @@ repository_overrides:
       title_format: '{{.Branch}}: {{.Title}}'
 ```
 
-Formatting fields are `commit.branch_pattern`, `commit.branch_replacement`, `commit.fix_message`, and `pr.title_format`; each retains the same fail-closed validation as its global or repository-config equivalent.
+Formatting fields are `commit.branch_pattern`, `commit.branch_replacement`, `commit.fix_message`, `commit.trailers`, and `pr.title_format`; each retains the same fail-closed validation as its global or repository-config equivalent.
 A `commit.branch_replacement` must be paired with `commit.branch_pattern` in the same override.
-Precedence is explicit: `.no-mistakes.yaml` wins for every field it sets, then a matching machine-local override, then the plain global value, then the built-in default.
+Precedence for these formatting fields is explicit: `.no-mistakes.yaml` wins for every field it sets, then a matching machine-local override, then the plain global value, then the built-in default.
 As with the global replacement, a repository `commit.branch_pattern` replaces the matching machine-local pattern and clears its replacement.
 Repositories matching no block keep existing global and built-in behavior.
+
+#### Machine-local review and documentation guidance
+
+A matching entry can add review rules and documentation policy for that one repository, without committing anything to it:
+
+```yaml
+repository_overrides:
+  https://gitlab.example.com/group/app-one.git:
+    review:
+      path_instructions:
+        - path: "**/*.cs"
+          instructions: |
+            Sync wording is always "sync from <upstream>": it is a one-way overwrite, never a merge.
+    document:
+      instructions: |
+        Configuration keys are owned by docs/reference/config.md.
+```
+
+`review.path_instructions` behaves like the [global list](#reviewpath_instructions): its rules render in their own labeled section after the global rules and before the repository's trusted rules, and they count toward the same combined limits.
+`document.instructions` is added to the document step's prompt in a labeled section before the repository's trusted [`document.instructions`](/no-mistakes/reference/repo-config/#documentinstructions), and like that field it augments the built-in placement policy and cannot weaken it.
+Both are additive only: the repository's trusted values still apply in full.
+Under `review` only `path_instructions` is accepted, and under `document` only `instructions`; settings that could weaken a gate, such as `no_ci`, `allow_repo_commands`, or `pr.base_branch`, are not accepted here.
+
+Eval replay cases store no remote URL, so a replay does not apply a matching entry's review or documentation guidance.
 
 #### Machine-local commands
 
@@ -1114,7 +1247,7 @@ no-mistakes reaps its recorded run directories itself rather than relying on an 
 
 Reaping runs after each finished run and again at daemon startup. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
 
-`local_root` must be an absolute path outside `<NM_HOME>/worktrees`; a relative or managed-worktree path fails daemon startup and prevents new or recovered runs from starting. Because `retention` bounds how long a PR body's local artifact links keep resolving, raise it rather than lowering it if your reviews run long.
+`local_root` must be an absolute path outside `<NM_HOME>/worktrees` and must not equal, contain, or sit inside `<NM_HOME>/logs`. Placement checks resolve symlinks, including existing ancestors of paths not yet created, and recognize filesystem aliases such as case variants on case-insensitive volumes. These restrictions keep publishable evidence separate from private logs and configuration snapshots. An invalid placement fails daemon startup and prevents new or recovered runs from starting. Because `retention` bounds how long a PR body's local artifact links keep resolving, raise it rather than lowering it if your reviews run long.
 
 The publication fields are global defaults. Repo config can override `store_in_repo`, `attach_media`, and `dir`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
 
