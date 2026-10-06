@@ -356,7 +356,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	if reader, ok := host.(scm.PRBaseBranchReader); ok {
 		if actual, readErr := reader.GetPRBaseBranch(ctx, pr); readErr == nil {
 			pr.BaseBranch = actual
-		} else if pluginContractBroken(readErr) {
+		} else if provider.IsPlugin() {
 			// A one-time read, not a poll: even a timeout fails closed,
 			// since falling back to the configured base could monitor or
 			// repair against a target the PR no longer has.

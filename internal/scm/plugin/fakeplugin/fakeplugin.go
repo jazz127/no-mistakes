@@ -43,6 +43,7 @@ type State struct {
 	// HangOn makes the named subcommand (for example "pr view") sleep far
 	// past any test timeout, so the adapter's per-call deadline fires.
 	HangOn string `json:"hang_on,omitempty"`
+	FailOn string `json:"fail_on,omitempty"`
 	// Checks are reported for every PR.
 	Checks []Check `json:"checks"`
 	// MergeWhenChecksPass marks a PR merged at the head the CI step asked
@@ -153,6 +154,9 @@ func Main(args []string, stdin io.Reader, stdout io.Writer, statePath, logPath s
 	}
 	if state.HangOn != "" && state.HangOn == call.Command {
 		time.Sleep(10 * time.Minute)
+	}
+	if state.FailOn != "" && state.FailOn == call.Command {
+		return fail(stdout, "service_unavailable", "transient service error")
 	}
 	result, changed, err := serve(&state, call, body)
 	if err != nil {

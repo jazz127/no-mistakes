@@ -123,10 +123,13 @@ func (p *Paths) EvidenceRoot(configured string) string {
 // ValidateEvidenceRoot rejects configured evidence roots inside managed worktrees.
 func (p *Paths) ValidateEvidenceRoot(configured string) error {
 	root := p.EvidenceRoot(configured)
-	worktrees := filepath.Clean(p.WorktreesDir())
-	rel, err := filepath.Rel(worktrees, root)
-	if err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))) {
+	worktrees := p.WorktreesDir()
+	if Contains(worktrees, root) {
 		return fmt.Errorf("test.evidence.local_root %q must not be inside managed worktrees %q", root, worktrees)
+	}
+	logs := p.LogsDir()
+	if Contains(logs, root) || Contains(root, logs) {
+		return fmt.Errorf("test.evidence.local_root %q must not overlap private logs %q", root, logs)
 	}
 	return nil
 }

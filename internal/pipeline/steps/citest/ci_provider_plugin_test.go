@@ -207,3 +207,47 @@ func TestCIStep_ProviderPluginSkipsWithReasonAndFailsClosedOnProtocolViolation(t
 		})
 	}
 }
+
+func TestCIStep_ProviderPluginFailedLiveBaseReadStopsBeforeMonitoringOrRepair(t *testing.T) {
+	t.Parallel()
+	for _, fixing := range []bool{false, true} {
+		name := "monitor"
+		if fixing {
+			name = "repair"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			sctx, _ := pluginCIContext(t, fakeplugin.State{
+				FailOn: "pr view",
+				PRs:    []fakeplugin.PR{{Number: "7", URL: pluginPRURL, HeadBranch: "feature", BaseBranch: "release", State: "open"}},
+			})
+			sctx.Config.PR.BaseBranch = "main"
+			sctx.Fixing = fixing
+			sctx.PreviousFindings = stepstest.CIGateFindingsJSON("build")
+			ag := &stepstest.MockAgent{AgentName: "test"}
+			sctx.Agent = ag
+			logPath := filepath.Join(t.TempDir(), "plugin-calls.ndjson")
+			sctx.Env = append(sctx.Env, fakeplugin.EnvLog+"="+logPath)
+			tipCalls := 0
+			step := (&steps.CIStep{}).SetWaitForNextPoll(failOnExtraPoll).SetBaseBranchTip(func(context.Context) (string, bool) {
+				tipCalls++
+				return "wrong-base-tip", true
+			})
+			outcome, err := step.Execute(sctx)
+			var pluginErr *plugin.Error
+			if outcome != nil || !errors.As(err, &pluginErr) || pluginErr.Code != "service_unavailable" || errors.Is(err, plugin.ErrProtocol) {
+				t.Fatalf("CI = %+v, %v; want the ordinary live-base service error", outcome, err)
+			}
+			if tipCalls != 0 || len(ag.Calls) != 0 {
+				t.Fatalf("failed live-base read reached monitoring (%d) or repair (%d)", tipCalls, len(ag.Calls))
+			}
+			calls, err := fakeplugin.ReadLog(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(calls) != 2 || calls[0].Command != "status" || calls[1].Command != "pr view" {
+				t.Fatalf("failed live-base read continued provider operations: %+v", calls)
+			}
+		})
+	}
+}
