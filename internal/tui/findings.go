@@ -144,10 +144,10 @@ func (m *Model) selectedUserAddedFindings(step types.StepName) []finding {
 }
 
 // unselectedFindingIDs returns the agent-produced finding IDs that are NOT
-// selected: the findings this fix response explicitly declines. The daemon
-// requires every finding the gate shows to be either fixed or declined, so the
-// checkbox selection maps onto the protocol as both lists; user-added findings
-// are not gate findings and never belong here.
+// selected: the findings this fix response explicitly declines. The checkbox
+// selection supplies both protocol lists; respondCmd retries without declines
+// of findings previously chosen to fix, preserving those decisions. User-added
+// findings are not gate findings and never belong here.
 func (m *Model) unselectedFindingIDs(step types.StepName) []string {
 	selected := m.findingSelections[step]
 	var ids []string

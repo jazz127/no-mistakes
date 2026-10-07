@@ -8,7 +8,7 @@ import (
 )
 
 // UninstallSupported reports whether daemon uninstall can remove a managed
-// service on this platform. Only macOS keeps a service definition after stop.
+// service on this platform. Removal is currently supported only on macOS.
 func UninstallSupported() bool {
 	return runtimeGOOS == "darwin"
 }

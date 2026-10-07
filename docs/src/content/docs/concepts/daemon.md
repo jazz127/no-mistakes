@@ -60,7 +60,7 @@ If pending or running pipeline runs exist, `update` refuses to restart the daemo
 If the daemon is already running from a different executable path, update still prompts before replacing it; `-y`/`--yes` answers that prompt non-interactively.
 If the daemon executable path cannot be determined, the update aborts before replacing anything.
 
-`no-mistakes daemon stop`, `no-mistakes daemon uninstall`, and `no-mistakes daemon restart` apply the same guard: if pending or running pipeline runs exist, each refuses by default and lists the active runs, and each takes its own `--force` to proceed anyway.
+`no-mistakes daemon stop` and `no-mistakes daemon restart` apply the same guard: if pending or running pipeline runs exist, each refuses by default and lists the active runs, and each takes its own `--force` to proceed anyway. On macOS, `no-mistakes daemon uninstall` applies this guard too; on other platforms it returns without checking active runs or removing a service.
 That `--force` override is available only to an ordinary top-level caller. A
 process descended from an active validation-step agent cannot start, stop,
 restart, uninstall, or update the daemon; recursive containment refuses the command before
@@ -147,7 +147,7 @@ Daemon lifecycle logs go to `~/.no-mistakes/logs/daemon.log`. Startup logs repor
 
 Managed Rovo Dev and OpenCode server stdout and stderr go to `~/.no-mistakes/logs/managed-server.log`, separate from concise server startup, exit, and failure summaries in the lifecycle log. Output written before the lifecycle logger is ready, plus direct crash output, goes to `~/.no-mistakes/logs/daemon-bootstrap.log`. The lifecycle log retains a 32 MiB current file and three backups, managed-server output retains a 16 MiB current file and two backups, and bootstrap/crash output retains a 1 MiB current file and two backups. Backups use `.1` for the newest retained file.
 
-The setup wizard separately captures managed agent-server output in `~/.no-mistakes/logs/wizard-agent.log`. Each pipeline step writes to `~/.no-mistakes/logs/<runID>/<step>.log`, and fatal step errors are appended there so the step log includes the failure reason even when the detail comes from command stderr. Per-run logs are subject to [local artifact retention](/no-mistakes/reference/global-config/#local-storage-and-cleanup). `daemon stop`, `daemon uninstall`, `daemon restart`, and `update` invocations are logged separately to `~/.no-mistakes/logs/cli.log` with the caller's PID, parent PID, and parent command line.
+The setup wizard separately captures managed agent-server output in `~/.no-mistakes/logs/wizard-agent.log`. Each pipeline step writes to `~/.no-mistakes/logs/<runID>/<step>.log`, and fatal step errors are appended there so the step log includes the failure reason even when the detail comes from command stderr. Per-run logs are subject to [local artifact retention](/no-mistakes/reference/global-config/#local-storage-and-cleanup). Lifecycle caller logging is described under [starting and stopping](#starting-and-stopping).
 
 Set the log level in global config:
 
@@ -158,10 +158,12 @@ log_level: debug # debug | info | warn | error
 ## Shutdown
 
 `no-mistakes daemon stop` stops the current daemon process without removing the managed service. The next `no-mistakes daemon start`, `no-mistakes`, `init`, `attach`, `rerun`, or `update` will start it again through the same service manager when available, or as a detached daemon otherwise.
-On macOS, the retained LaunchAgent also starts it again at the next login. To remove that automatic startup, use `no-mistakes daemon uninstall`: it stops the managed daemon for the current `NM_HOME` and removes its LaunchAgent plist. It reports the removed file, succeeds when no LaunchAgent is installed, and keeps application data. On other platforms it changes nothing, prints that no service removal is available, and exits 0. If this instance only has a detached daemon, use `daemon stop` to stop that process.
+On macOS, the retained LaunchAgent also starts it again at the next login. To remove that automatic startup, use `no-mistakes daemon uninstall`: it stops the managed daemon for the current `NM_HOME` and removes its LaunchAgent plist only after confirming the daemon process has exited. If stopping fails, the plist is retained and the command fails. It reports the removed file, succeeds when no LaunchAgent is installed, and keeps application data. On other platforms it removes no service and stops no daemon, prints that no service removal is available, and exits 0. If this instance only has a detached daemon, use `daemon stop` to stop that process.
 The [starting and stopping](#starting-and-stopping) section owns the active-run
 guard, the top-level `--force` override, and the separate validation-step
 containment rule.
+
+When the daemon shuts down, it:
 
 1. Cancels all active runs
 2. Waits up to 30 seconds for goroutines to finish

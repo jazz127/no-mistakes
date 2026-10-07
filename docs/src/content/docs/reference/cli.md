@@ -298,7 +298,7 @@ Declines are explicit. With `--action fix`, every finding the gate shows must ap
 
 Finding IDs are trimmed before validation. An added finding with no ID, or an ID that collides with any gate finding, receives a fresh ID. Ignored findings and selections already recorded for a recovered round also reserve their IDs. See [Finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history) for how a fix response restores acknowledged work after recovery.
 
-Every successful fix response echoes what it recorded in a `recorded:` object: `fixed` (the findings selected, including `--add-finding` items under their normalized IDs), `ignored` (the findings explicitly declined), and `kept` (the gate findings omitted that a previous response for this step had already decided). A finding the restored decision dispatched is reported under `fixed`, not also under `kept`. Approve, skip, and abort emit no disposition echo. They are not decision-free: a nonempty gate they resolve is recorded as a decline round, which is what later rounds read as `user_chose_to_ignore`. `--yes` resolution is unchanged: it selects every current finding.
+Every successful fix response echoes what it recorded in a `recorded:` object: `fixed` (the findings selected, including `--add-finding` items under their normalized IDs), `ignored` (the findings explicitly declined), and `kept` (the gate findings omitted that a previous response for this step had already decided). A finding the restored decision dispatched is reported under `fixed`, not also under `kept`. Approve, skip, and abort emit no disposition echo; their recorded decisions are described under [Finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history). Automatic resolution follows the eligibility rules under [`axi run --yes`](#no-mistakes-axi-run).
 
 For an explicitly authorized Test exception, use `no-mistakes axi respond --step test --action approve --reason "the operator's explanation"`.
 The reason is optional: approval without one remains effective, and a qualifying exception is reported with no operator reason supplied.
@@ -761,7 +761,7 @@ no-mistakes daemon uninstall
 no-mistakes daemon uninstall --force
 ```
 
-Removes the LaunchAgent plist and names it in the output. If no LaunchAgent is installed, it succeeds with a message saying so. On other platforms it changes nothing, prints that no service removal is available there, and exits 0. It preserves application data and does not stop a detached daemon when no managed service exists. A later `daemon start` or a command that ensures the daemon is running can install the service again.
+The [daemon shutdown model](/no-mistakes/concepts/daemon/#shutdown) owns removal, failure, data-preservation, and platform semantics. A later `daemon start` or a command that ensures the daemon is running can install the service again.
 
 [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the active-run guard, the scope of `--force`, and recursive validation-step containment.
 

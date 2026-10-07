@@ -1277,8 +1277,8 @@ func (e *respondRefusalError) helpLines() []string {
 }
 
 // respondDispositionFields renders what a response recorded for its gate. It is
-// empty for actions that record no finding-level decision, so only a fix
-// response is echoed.
+// empty when the result carries no dispositions. Approve, skip, and abort
+// record decisions without these fields, so only a fix response is echoed.
 func respondDispositionFields(result ipc.RespondResult) []toon.Field {
 	if !result.OK || (result.Fixed == nil && result.Ignored == nil && result.Kept == nil) {
 		return nil

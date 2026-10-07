@@ -31,9 +31,10 @@ metadata:
 
 **Destructive Daemon Lifecycle Guard (`internal/lifecycle/guard.go`)**
 
-- `daemon stop`, `daemon restart`, and `update` refuse by default while pending/running runs exist (the daemon is machine-wide, so stopping it can fail every active pipeline), list the runs via the shared `lifecycle.ActiveRuns`/`lifecycle.RunList` helpers, and require an explicit `--force`. `update -y` answers only the different-executable prompt and deliberately does not bypass this guard.
-- Every invocation of the three commands is logged with caller attribution (PID, PPID, parent command line) via `logLifecycleInvocation` to `<NM_HOME>/logs/cli.log`; this is the incident forensic trail, do not remove or weaken it.
-- Regressions: `TestDaemonStopRefusesWithActiveRunsAndListsThem`, `TestDaemonStopForceOverridesActiveRunGuard`, `TestDaemonRestartRefusesWithActiveRuns`, `TestLifecycleCommandsWriteCallerAttributionToCLILog` (`internal/cli/daemon_lifecycle_test.go`), `TestUpdaterRunRefusesWithActiveRunsAndListsThem`, `TestUpdaterActiveRunGuardAllowsForce` (`internal/update`).
+- `guardDestructiveDaemonLifecycle` (`internal/cli/daemon_cmd.go`) uses the shared `lifecycle.ActiveRuns`/`lifecycle.RunList` helpers for stop, restart, and supported uninstall; `internal/update` applies the update guard. The user-facing guard and override rules are owned by `docs/src/content/docs/concepts/daemon.md` (Starting and stopping). Unsupported uninstall returns before the active-run query.
+- Every invocation of stop, uninstall, restart, or update is logged with caller attribution via `logLifecycleInvocation`; this is the incident forensic trail, do not remove or weaken it. The log path and fields are owned by the daemon concept document.
+- `Uninstall` (`internal/daemon/uninstall.go`) captures the running instance before stopping the LaunchAgent and calls `waitForDaemonStop` before removing the plist; a stop failure must retain the definition. Regressions: `internal/daemon/uninstall_test.go`.
+- Regressions: `TestDaemonStopRefusesWithActiveRunsAndListsThem`, `TestDaemonStopForceOverridesActiveRunGuard`, `TestDaemonRestartRefusesWithActiveRuns`, `TestLifecycleCommandsWriteCallerAttributionToCLILog` (`internal/cli/daemon_lifecycle_test.go`), `TestDaemonUninstallRefusesActiveRunsUnlessForced`, `TestDaemonUninstallOnUnsupportedPlatformChangesNothingAndSucceeds` (`internal/cli/daemon_uninstall_test.go`), `TestUpdaterRunRefusesWithActiveRunsAndListsThem`, `TestUpdaterActiveRunGuardAllowsForce` (`internal/update`).
 
 **Daemon Login-Shell Environment (`internal/shellenv`)**
 

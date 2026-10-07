@@ -249,11 +249,8 @@ Run the pipeline and decide on its findings as they come up:
       as a JSON finding object. Use it for a problem you noticed that is not in
       the gate's own `findings` table.
     - `--ignore <id1,id2>` (with `--action fix`) declines the named findings.
-      Every finding in the gate's `findings` table must appear in
-      `--findings` or `--ignore`; anything left out is refused, naming the
-      ids, so an omission can never be recorded as a decline. A finding an
-      earlier round of this step already chose to fix cannot be listed here:
-      reverting an applied fix is out of scope for a gate response.
+      Follow the accounting rules above, including when an earlier decision
+      permits omitting a finding and when a decline is refused.
     - `--step <name>` responds to a specific step instead of the one currently
       awaiting approval. You rarely need this; omit it to answer the active gate.
 3. Repeat step 2 until the output has an `outcome:` instead of a `gate:`. The
