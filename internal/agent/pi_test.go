@@ -262,7 +262,7 @@ printf '%s\n' '{"type":"agent_end","messages":[]}'
 	if result.Text != `{"ok":true}` {
 		t.Fatalf("unexpected text: %s", result.Text)
 	}
-	if result.Usage.InputTokens != 11 || result.Usage.OutputTokens != 7 ||
+	if result.Usage.InputTokens != 15 || result.Usage.OutputTokens != 7 ||
 		result.Usage.CacheReadTokens != 3 || result.Usage.CacheCreationTokens != 1 {
 		t.Fatalf("unexpected usage: %+v", result.Usage)
 	}
@@ -363,8 +363,8 @@ printf '%s\n' "{\"type\":\"agent_end\",\"messages\":[{\"role\":\"user\",\"conten
 	if started.SessionID != sessionID || started.Resumed {
 		t.Fatalf("started session = %+v, want id=%q and Resumed=false", started, sessionID)
 	}
-	if started.Usage.InputTokens != 11 || started.SessionUsageCumulative {
-		t.Fatalf("started usage = %+v, want invocation-only input 11", started.Usage)
+	if started.Usage.InputTokens != 15 || started.SessionUsageCumulative {
+		t.Fatalf("started usage = %+v, want invocation-only input 15", started.Usage)
 	}
 	if got, err := os.ReadFile(filepath.Join(workDir, "pi-session-id")); err != nil || strings.TrimSpace(string(got)) != sessionID {
 		t.Fatalf("persisted session ID = %q, %v; want %q", got, err, sessionID)
@@ -377,8 +377,8 @@ printf '%s\n' "{\"type\":\"agent_end\",\"messages\":[{\"role\":\"user\",\"conten
 	if resumed.SessionID != sessionID || !resumed.Resumed {
 		t.Fatalf("resumed session = %+v, want id=%q and Resumed=true", resumed, sessionID)
 	}
-	if resumed.Usage.InputTokens != 22 || resumed.SessionUsageCumulative {
-		t.Fatalf("resumed usage = %+v, want invocation-only input 22", resumed.Usage)
+	if resumed.Usage.InputTokens != 26 || resumed.SessionUsageCumulative {
+		t.Fatalf("resumed usage = %+v, want invocation-only input 26", resumed.Usage)
 	}
 
 	argv, err := os.ReadFile(filepath.Join(workDir, "pi-argv.txt"))
@@ -407,7 +407,7 @@ func TestPiAgent_SchemaRejectedOutputStillReportsUsage(t *testing.T) {
 	if result == nil {
 		t.Fatal("schema rejection must still return parsed usage")
 	}
-	if result.Usage.InputTokens != 11 || result.Usage.OutputTokens != 7 ||
+	if result.Usage.InputTokens != 22 || result.Usage.OutputTokens != 7 ||
 		result.Usage.CacheReadTokens != 9 || result.Usage.CacheCreationTokens != 2 ||
 		!result.UsageReported {
 		t.Fatalf("usage = %+v reported=%v", result.Usage, result.UsageReported)
@@ -438,7 +438,7 @@ exit 1
 	if result == nil {
 		t.Fatal("exit failure must still return parsed usage")
 	}
-	if result.Usage.InputTokens != 11 || result.Usage.OutputTokens != 7 ||
+	if result.Usage.InputTokens != 22 || result.Usage.OutputTokens != 7 ||
 		result.Usage.CacheReadTokens != 9 || !result.UsageReported {
 		t.Fatalf("usage = %+v reported=%v", result.Usage, result.UsageReported)
 	}
@@ -562,7 +562,7 @@ func TestPiParser_SumsUniqueAssistantUsageAcrossTurns(t *testing.T) {
 	if err := pp.parse(context.Background(), strings.NewReader(stream)); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	want := TokenUsage{InputTokens: 11, OutputTokens: 7, CacheReadTokens: 9, CacheCreationTokens: 11, Reported: true, CacheCreationReported: true}
+	want := TokenUsage{InputTokens: 31, OutputTokens: 7, CacheReadTokens: 9, CacheCreationTokens: 11, Reported: true, CacheCreationReported: true}
 	if pp.usage != want {
 		t.Fatalf("usage = %+v, want %+v", pp.usage, want)
 	}

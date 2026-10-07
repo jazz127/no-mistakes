@@ -74,8 +74,8 @@ func TestReplayTokensCoverEveryReviewAttempt(t *testing.T) {
 		wantOutput   int64
 		wantFresh    int64
 	}{
-		{name: "schema-rejected attempt still reports usage", first: missingRiskLevel, wantReported: true, wantInput: 200, wantOutput: 40, wantFresh: 140},
-		{name: "two attempts that both report usage", first: blankRationale, wantReported: true, wantInput: 200, wantOutput: 40, wantFresh: 140},
+		{name: "schema-rejected attempt still reports usage", first: missingRiskLevel, wantReported: true, wantInput: 260, wantOutput: 40, wantFresh: 200},
+		{name: "two attempts that both report usage", first: blankRationale, wantReported: true, wantInput: 260, wantOutput: 40, wantFresh: 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()

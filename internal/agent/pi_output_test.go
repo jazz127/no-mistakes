@@ -98,7 +98,7 @@ func TestPiAgent_StructuredOutputUsesAnEphemeralExtension(t *testing.T) {
 	if result.SessionID != sessionID || !result.Resumed || result.SessionUsageCumulative {
 		t.Fatalf("session: %+v", result)
 	}
-	if result.Usage.InputTokens != 11 || result.Usage.OutputTokens != 7 || result.Usage.CacheReadTokens != 9 || result.Usage.CacheCreationTokens != 2 {
+	if result.Usage.InputTokens != 22 || result.Usage.OutputTokens != 7 || result.Usage.CacheReadTokens != 9 || result.Usage.CacheCreationTokens != 2 {
 		t.Fatalf("usage: %+v", result.Usage)
 	}
 	argv, err := os.ReadFile(filepath.Join(cwd, "pi-argv.txt"))
