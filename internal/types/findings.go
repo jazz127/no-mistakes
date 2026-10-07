@@ -424,9 +424,14 @@ func FindingsMetadata(findings Findings) Findings {
 	return findings
 }
 
-// NormalizeFindings assigns deterministic IDs to findings that do not have one yet.
+// NormalizeFindings assigns deterministic IDs to findings that do not have one
+// yet, and trims the ones they arrive with. Surrounding whitespace is never
+// part of a finding's identity: the gate shows the ID and a response names it,
+// and the response side trims what it is given, so a padded gate ID used to
+// have no spelling that could select or decline it.
 func NormalizeFindings(findings Findings, prefix string) Findings {
 	for i := range findings.Items {
+		findings.Items[i].ID = strings.TrimSpace(findings.Items[i].ID)
 		if findings.Items[i].ID != "" {
 			continue
 		}
@@ -515,6 +520,10 @@ func MergeUserOverrides(findings Findings, instructions map[string]string, added
 		if item.Action == "" {
 			item.Action = ActionAutoFix
 		}
+		// The added ID is trimmed for the same reason the producer's is: the
+		// identity a later round attributes by must not carry whitespace, and a
+		// padded collision must still be seen as a collision.
+		item.ID = strings.TrimSpace(item.ID)
 		if item.ID == "" || used[item.ID] {
 			item.ID, counter = nextUserFindingID(used, counter)
 		} else {

@@ -710,9 +710,16 @@ func combineSelectedFindingIDs(selected []string, mergedFindings string) []strin
 	return result
 }
 
-// mergeUserOverridesJSON takes a findings JSON payload and applies
-// per-finding user instructions and user-authored findings. When no
-// overrides are present the input is returned unchanged.
+func resolveAddedFindingIDs(added []types.Finding, reserved ...string) []types.Finding {
+	gate := types.Findings{}
+	for _, raw := range reserved {
+		findings, _ := types.ParseFindingsJSON(raw)
+		gate.Items = append(gate.Items, findings.Items...)
+	}
+	merged := types.MergeUserOverrides(gate, nil, added)
+	return merged.Items[len(gate.Items):]
+}
+
 func mergeUserOverridesJSON(raw string, instructions map[string]string, added []types.Finding) string {
 	if len(instructions) == 0 && len(added) == 0 {
 		return raw

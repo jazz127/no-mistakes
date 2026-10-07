@@ -547,7 +547,7 @@ func (rv runView) automaticSkips() []automaticSkipRow {
 func gateFields(gate stepView) []toon.Field {
 	help := []string{
 		"Run `no-mistakes axi respond --action approve` to accept this step and continue",
-		"Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)",
+		"Run `no-mistakes axi respond --action fix --findings <ids> [--ignore <ids>]` to have the pipeline fix the selected findings (do not edit files yourself); list every finding below in `--findings` or `--ignore`, unless an earlier round of this step already decided it, and a finding that round chose to fix cannot be declined by a later response",
 	}
 	// A review parked in waiting-on-answers is not asking for a verdict: its
 	// reviewer asked questions and cannot finish without them. Approving or

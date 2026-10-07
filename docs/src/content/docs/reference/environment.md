@@ -20,6 +20,7 @@ When set, everything else moves under this root:
 - Logs: `$NM_HOME/logs/`
 - Database: `$NM_HOME/state.sqlite`
 - Socket / PID / singleton lock: `$NM_HOME/socket`, `$NM_HOME/daemon.pid`, and `$NM_HOME/daemon.lock`
+- The socket path must fit the platform's Unix socket limit: 103 bytes on macOS, 107 on Linux. `daemon start`, `daemon restart`, `daemon status`, `init`, `attach`, `rerun`, `axi run`, and the push hook fail with a message that names the path, its length, and the limit when it is too long. Use a shorter `NM_HOME`. The physical path counts: a symbolic link to a long directory does not help, because the push hook dials the resolved path.
 - Managed agent server PID records: `$NM_HOME/servers/`
 - Local evaluation cases and registry: `$NM_HOME/eval/` (created by automatic collection or an explicit `no-mistakes eval` command)
 - Managed service names get a short stable suffix derived from `$NM_HOME` so multiple installs don't collide.

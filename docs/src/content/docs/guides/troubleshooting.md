@@ -88,7 +88,7 @@ If you have multiple installs with different `NM_HOME` roots, each gets its own 
 
 Symptom: `update` refuses because active pipeline runs are in progress, prompts because the daemon is running from a different executable path, or aborts because the daemon executable path cannot be determined.
 
-`update`, `daemon stop`, and `daemon restart` all refuse by default while pipeline runs are active and list the affected runs; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the guard's exact rules, including why `-y`/`--yes` does not bypass it.
+See [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) for the lifecycle commands covered by the active-run guard, platform differences, and why `-y`/`--yes` does not bypass it.
 
 First inspect each listed run with `no-mistakes axi status --run <id>`.
 A parked CI gate can clear itself after its PR becomes terminal, including after a daemon restart.

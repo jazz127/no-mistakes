@@ -208,9 +208,23 @@ Run the pipeline and decide on its findings as they come up:
    # have the pipeline fix specific findings, then continue
    no-mistakes axi respond --action fix --findings <id1,id2> --instructions "<optional guidance>"
 
+   # fix some findings and explicitly decline the rest
+   no-mistakes axi respond --action fix --findings <id1,id2> --ignore <id3>
+
    # skip this step
    no-mistakes axi respond --action skip
    ```
+   With `--action fix`, declines are explicit: every finding the gate shows
+   must be listed in `--findings` or `--ignore`, and a response that
+   leaves one out is refused with the missing ids named while the gate stays
+   parked. A finding an earlier round of this step already decided may be
+   omitted to keep that decision - omitting it does **not** decline it - and a
+   finding that round chose to fix cannot be declined by a later response at
+   all: reverting an applied fix is out of scope for a gate response, so list
+   it in `--findings` to fix it again or leave it out to keep it. Every
+   successful `fix` response echoes what it recorded in a `recorded:` object
+   (`fixed`, `ignored`, `kept`), so read it to confirm the decision
+   you actually made.
    While a run is active, never fix findings by editing the code yourself -
    the pipeline owns both the findings and the fixes. Your job at a gate is to
    decide and respond; `--action fix` has the pipeline apply the fix and
@@ -234,6 +248,9 @@ Run the pipeline and decide on its findings as they come up:
       spotted yourself - one the pipeline did not surface - into the fix round,
       as a JSON finding object. Use it for a problem you noticed that is not in
       the gate's own `findings` table.
+    - `--ignore <id1,id2>` (with `--action fix`) declines the named findings.
+      Follow the accounting rules above, including when an earlier decision
+      permits omitting a finding and when a decline is refused.
     - `--step <name>` responds to a specific step instead of the one currently
       awaiting approval. You rarely need this; omit it to answer the active gate.
 3. Repeat step 2 until the output has an `outcome:` instead of a `gate:`. The
@@ -353,6 +370,11 @@ reported edit, then send `--action fix` to retry the unfinished step.
 The [protected-path reference](https://kunchenguid.github.io/no-mistakes/reference/repo-config/#protected_paths)
 owns the staging guard's scope and limitations.
 
+A gate holding open `question-<id>` findings is not eligible either: a question
+is settled by `axi answer`, never by a verdict, so `--yes` stands aside
+there - as it does when the question history cannot be read end to end, which
+also parks for a human.
+
 A `test-agent-unvalidated-work` finding means a timed-out Test agent left
 commits or changes no Test turn validated. Approval is rejected, so `--yes`
 stops at that gate without responding. Relay what the finding names and do
@@ -394,7 +416,7 @@ findings[2]{id,severity,file,line,action,description}:
   r2,error,cmd/no-mistakes/main.go,,ask-user,New --force flag bypasses the confirm prompt
 help[6]:
   Run `no-mistakes axi respond --action approve` to accept this step and continue
-  Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)
+  Run `no-mistakes axi respond --action fix --findings <ids> [--ignore <ids>]` to have the pipeline fix the selected findings (do not edit files yourself); list every finding below in `--findings` or `--ignore`, unless an earlier round of this step already decided it, and a finding that round chose to fix cannot be declined by a later response
   Run `no-mistakes axi respond --action skip` to skip this step
   Run `no-mistakes axi logs --step review --full` to read the complete step summary and log
   A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.

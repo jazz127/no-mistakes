@@ -204,6 +204,7 @@ If the configured native agent or ACP runner is unavailable, the run fails befor
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 The [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths) are an exception to this automatic handling.
+So is an open [review question](/no-mistakes/concepts/review-conversation/), which is settled by an answer rather than by a verdict, and a review question history that cannot be read end to end: `--yes` stands aside at both instead of selecting findings.
 So is a Test budget-cut gate that reports `test-agent-unvalidated-work`: approval is refused there, so `--yes` stops at it and leaves the choice between `--action fix` and `no-mistakes axi abort` to the operator (see [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout)).
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.
 Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
@@ -276,6 +277,7 @@ Answer the current approval gate and continue until the next gate, CI-ready deci
 ```sh
 no-mistakes axi respond --action approve
 no-mistakes axi respond --action fix --findings F1,F2 --instructions "optional guidance"
+no-mistakes axi respond --action fix --findings F1,F2 --ignore F3
 no-mistakes axi respond --action fix --add-finding '{"description":"...","action":"auto-fix"}'
 no-mistakes axi respond --action skip
 ```
@@ -284,12 +286,19 @@ no-mistakes axi respond --action skip
 | ---------------- | -------- | ------------- | -------------------------------------------------------------------- |
 | `--action`       | `string` | (none)        | `approve`, `fix`, or `skip`; required. A reviewer's open question is answered with [`axi answer`](#no-mistakes-axi-answer), not here |
 | `--step`         | `string` | awaiting step | Step to respond to                                                   |
-| `--findings`     | `string` | (none)        | Comma-separated finding IDs for `--action fix`                       |
+| `--findings`     | `string` | (none)        | Comma-separated finding IDs to fix with `--action fix`               |
+| `--ignore`       | `string` | (none)        | Comma-separated finding IDs to decline with `--action fix`; see the accounting rules below |
 | `--instructions` | `string` | (none)        | Guidance applied to selected findings with `--action fix`            |
 | `--reason`       | `string` | (none)        | Operator's exception explanation for Test approval only              |
 | `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
 | `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve subsequent eligible gates until a decision point or outcome |
 | `--wait`         | `duration` | `8m`        | Maximum time for pre-drive reads and post-response driving before the caller must reattach |
+
+Declines are explicit. With `--action fix`, every finding the gate shows must appear in `--findings` or `--ignore`; a response that leaves one out is refused with the unaccounted IDs named and the gate stays parked, so a partial selection can never silently decline the findings it omitted. An ID in both lists, or an ID the gate does not show, is refused the same way. A finding a previous response for the same step already decided may be omitted to keep that decision, including when recovery parks the same round again. Naming a finding previously chosen to fix in `--ignore` is refused too, because reverting an applied fix is out of scope for a gate response. The validation fails closed on the state it reads: if the gate's findings or this step's earlier decisions cannot be read, the response is refused, the gate stays parked, and the refusal names what could not be read. See [Finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history) for how these decisions are stored and carried into later rounds.
+
+Finding IDs are trimmed before validation. An added finding with no ID, or an ID that collides with any gate finding, receives a fresh ID. Ignored findings and selections already recorded for a recovered round also reserve their IDs. See [Finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history) for how a fix response restores acknowledged work after recovery.
+
+Every successful fix response echoes what it recorded in a `recorded:` object: `fixed` (the findings selected, including `--add-finding` items under their normalized IDs), `ignored` (the findings explicitly declined), and `kept` (the gate findings omitted that a previous response for this step had already decided). A finding the restored decision dispatched is reported under `fixed`, not also under `kept`. Approve, skip, and abort emit no disposition echo; their recorded decisions are described under [Finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history). Automatic resolution follows the eligibility rules under [`axi run --yes`](#no-mistakes-axi-run).
 
 For an explicitly authorized Test exception, use `no-mistakes axi respond --step test --action approve --reason "the operator's explanation"`.
 The reason is optional: approval without one remains effective, and a qualifying exception is reported with no operator reason supplied.
@@ -741,6 +750,20 @@ owns the active-run guard, the scope of `--force`, and recursive
 validation-step containment.
 
 This does not remove the managed service. A later `no-mistakes`, `no-mistakes daemon start`, `init`, `attach`, `rerun`, or `update` can start the daemon again through the same service manager when available, or as a detached daemon otherwise.
+On macOS, the retained LaunchAgent starts the daemon again at the next login; the stop output names its plist and points to `daemon uninstall`.
+
+## no-mistakes daemon uninstall
+
+Stop and remove the macOS LaunchAgent for the current `NM_HOME` instance.
+
+```sh
+no-mistakes daemon uninstall
+no-mistakes daemon uninstall --force
+```
+
+The [daemon shutdown model](/no-mistakes/concepts/daemon/#shutdown) owns removal, failure, data-preservation, and platform semantics. A later `daemon start` or a command that ensures the daemon is running can install the service again.
+
+[Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the active-run guard, the scope of `--force`, and recursive validation-step containment.
 
 ## no-mistakes daemon restart
 

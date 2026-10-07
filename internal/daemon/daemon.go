@@ -1479,10 +1479,19 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		if err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.Instructions, p.AddedFindings, p.ApprovalReason); err != nil {
+		dispositions, err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, p.Instructions, p.AddedFindings, p.ApprovalReason)
+		if err != nil {
+			// A refused fix response is the caller's input to fix, not a
+			// transport failure: the gate is still parked. Report it as a
+			// structured result so the CLI can name the unaccounted findings
+			// and help, and the caller can send a corrected response.
+			var refusal *pipeline.RespondRefusal
+			if errors.As(err, &refusal) {
+				return &ipc.RespondResult{OK: false, Refusal: refusal.Message, Missing: refusal.Missing, DeclinedEarlierFix: refusal.DeclinedEarlierFix, Help: refusal.Help}, nil
+			}
 			return nil, err
 		}
-		return &ipc.RespondResult{OK: true}, nil
+		return &ipc.RespondResult{OK: true, Fixed: dispositions.Fixed, Ignored: dispositions.Ignored, Kept: dispositions.Kept}, nil
 	})
 
 	srv.Handle(ipc.MethodAnswerReview, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
