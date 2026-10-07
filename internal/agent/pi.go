@@ -602,7 +602,7 @@ func piUsageFrom(usage map[string]any) TokenUsage {
 	return TokenUsage{
 		Reported:              len(usage) > 0,
 		CacheCreationReported: cacheCreationReported,
-		InputTokens:           piIntField(usage, "input"),
+		InputTokens:           piIntField(usage, "input") + piIntField(usage, "cacheRead") + piIntField(usage, "cacheWrite"),
 		OutputTokens:          piIntField(usage, "output"),
 		CacheReadTokens:       piIntField(usage, "cacheRead"),
 		CacheCreationTokens:   piIntField(usage, "cacheWrite"),
