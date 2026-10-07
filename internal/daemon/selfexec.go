@@ -893,6 +893,9 @@ func upsertEnv(env []string, key, value string) []string {
 
 // EnsureDaemon starts the daemon if it's not already running.
 func EnsureDaemon(p *paths.Paths) error {
+	if err := ipc.CheckEndpointPath(p.Socket()); err != nil {
+		return err
+	}
 	alive, err := daemonHealthCheck(p)
 	if err != nil {
 		return fmt.Errorf("%w (run 'no-mistakes daemon start' to recover)", err)

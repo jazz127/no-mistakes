@@ -249,16 +249,23 @@ type SubscribeParams struct {
 // Instructions carries optional per-finding notes keyed by finding ID, which
 // the daemon attaches to the corresponding finding before dispatching a fix.
 // AddedFindings carries user-authored findings that are merged into the round
-// alongside agent-produced ones. Both fields only apply when Action triggers
-// a fix round.
+// alongside agent-produced ones. Instruction and AddedFindings only apply when
+// Action triggers a fix round.
+//
+// IgnoreFindingIDs are the gate's findings the response explicitly declines. A
+// fix response must account for every finding the gate shows: each one must be
+// in FindingIDs or IgnoreFindingIDs unless an earlier round of the same step
+// already decided it, and the daemon refuses the response (leaving the gate
+// parked) when one is left out. An omission is never a decline.
 type RespondParams struct {
-	RunID          string               `json:"run_id"`
-	Step           types.StepName       `json:"step"`
-	Action         types.ApprovalAction `json:"action"`
-	FindingIDs     []string             `json:"finding_ids,omitempty"`
-	Instructions   map[string]string    `json:"instructions,omitempty"`
-	AddedFindings  []types.Finding      `json:"added_findings,omitempty"`
-	ApprovalReason string               `json:"approval_reason,omitempty"` // Test approval only
+	RunID            string               `json:"run_id"`
+	Step             types.StepName       `json:"step"`
+	Action           types.ApprovalAction `json:"action"`
+	FindingIDs       []string             `json:"finding_ids,omitempty"`
+	IgnoreFindingIDs []string             `json:"ignore_finding_ids,omitempty"`
+	Instructions     map[string]string    `json:"instructions,omitempty"`
+	AddedFindings    []types.Finding      `json:"added_findings,omitempty"`
+	ApprovalReason   string               `json:"approval_reason,omitempty"` // Test approval only
 }
 
 // CancelRunParams cancels an active pipeline run.
@@ -358,9 +365,31 @@ type RerunResult struct {
 	RunID string `json:"run_id"`
 }
 
-// RespondResult confirms the action was accepted.
+// RespondResult confirms the action was accepted, or reports the dispositions
+// the response recorded and why a response was refused.
+//
+// The disposition fields are the daemon's echo of what it actually recorded, so
+// a driver sees a partial or inverted decision in the same call that made it
+// instead of two rounds later. Kept names the findings the response omitted
+// that an earlier round of the same step had already decided.
+//
+// A refusal is a result rather than a transport error because it is not a
+// transport failure: the gate is intact, the caller's response was wrong, and
+// the caller can correct it. Refusal is non-empty exactly when OK is false.
 type RespondResult struct {
-	OK bool `json:"ok"`
+	OK      bool     `json:"ok"`
+	Fixed   []string `json:"fixed,omitempty"`
+	Ignored []string `json:"ignored,omitempty"`
+	Kept    []string `json:"kept,omitempty"`
+	Refusal string   `json:"refusal,omitempty"`
+	Missing []string `json:"missing,omitempty"`
+	// DeclinedEarlierFix names the findings the response tried to decline that
+	// an earlier round of the same step already chose to fix. Reverting an
+	// applied fix is out of scope for a gate response, so the response was
+	// refused; a machine caller corrects it by omitting those findings to keep
+	// the earlier decision.
+	DeclinedEarlierFix []string `json:"declined_earlier_fix,omitempty"`
+	Help               string   `json:"help,omitempty"`
 }
 
 // AnswerReviewQuestionParams records one operator answer to a question the

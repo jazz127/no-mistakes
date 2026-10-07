@@ -1945,21 +1945,23 @@ func telemetryFailedStepName(database *db.DB, runID string) string {
 
 // HandleRespond routes a user approval action to the executor for the given run.
 func (m *RunManager) HandleRespond(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string) error {
-	return m.HandleRespondWithOverrides(runID, step, action, findingIDs, nil, nil, "")
+	_, err := m.HandleRespondWithOverrides(runID, step, action, findingIDs, nil, nil, nil, "")
+	return err
 }
 
-// HandleRespondWithOverrides is like HandleRespond but also forwards user
-// instructions and user-authored findings to the executor.
-func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string) error {
+// HandleRespondWithOverrides is like HandleRespond but also forwards explicit
+// declines, user instructions, and user-authored findings to the executor, and
+// returns the dispositions the response recorded.
+func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string) (pipeline.RespondDispositions, error) {
 	m.mu.Lock()
 	exec, ok := m.executors[runID]
 	m.mu.Unlock()
 
 	if !ok {
-		return fmt.Errorf("no active executor for run %s", runID)
+		return pipeline.RespondDispositions{}, fmt.Errorf("no active executor for run %s", runID)
 	}
 
-	return exec.RespondWithOverrides(step, action, findingIDs, instructions, addedFindings, approvalReason)
+	return exec.RespondWithOverrides(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason)
 }
 
 // HandleAnswerReviewQuestion records one operator answer to a question the
