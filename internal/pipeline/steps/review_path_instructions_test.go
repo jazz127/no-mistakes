@@ -252,6 +252,7 @@ func TestChangedPathList(t *testing.T) {
 // carries the case; the escaping contract for a control-character name is pinned
 // on every platform by TestMatchedFilesSummary_EscapesNonGraphicPaths.
 func TestChangedPathList_RenameAndUnusualNames(t *testing.T) {
+	t.Parallel()
 	dir, _, _ := setupGitRepo(t)
 
 	// Every filesystem call is checked: an unwritable name must fail here by
@@ -619,6 +620,7 @@ func TestLogPathInstructions(t *testing.T) {
 // prompt section for a mixed diff: one glob matches, a second matches a
 // different file, and a third matches nothing. Every block names its own scope.
 func TestEvidence_ReviewPathInstructionsMatchedPrompt(t *testing.T) {
+	t.Parallel()
 	rules := []config.PathInstruction{
 		{Path: "internal/scm/**", Instructions: "Any URL or error string that can carry credentials must go through internal/safeurl."},
 		{Path: "docs/**", Instructions: "Prose changes only. Do not request test coverage."},

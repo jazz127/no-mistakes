@@ -20,6 +20,7 @@ import (
 )
 
 func TestTestStep_HangingEvidenceAgentParksForADecision(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "hanging-evidence-agent",
@@ -64,6 +65,7 @@ func TestTestStep_HangingEvidenceAgentParksForADecision(t *testing.T) {
 }
 
 func TestTestStep_StreamingEvidenceAfterStallBudgetCompletes(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	const stall = 80 * time.Millisecond
 	done := time.NewTimer(stall + stall/2)

@@ -79,6 +79,7 @@ func strictPiDeclaration(t *testing.T, cwd string) map[string]any {
 }
 
 func TestPiStrictDeclarationLeavesSummaryLengthToPostValidation(t *testing.T) {
+	t.Parallel()
 	overLong, err := json.Marshal(strings.Repeat("a", config.MaxFixMessageSummaryBytes+1))
 	if err != nil {
 		t.Fatal(err)

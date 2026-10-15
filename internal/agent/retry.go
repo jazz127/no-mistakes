@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"regexp"
 	"strings"
@@ -66,16 +67,37 @@ func runWithRetry(
 	var lastErr error
 	var lastLabel string
 	var lastResult *Result
+	var lastDuration time.Duration
+	budgetForRetry := func() error {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return nil
+		}
+		left := time.Until(deadline)
+		if left >= lastDuration {
+			return nil
+		}
+		return fmt.Errorf("%s retry skipped: %s of the step budget remains, less than the %s the failed attempt took: %w",
+			name, left.Round(time.Millisecond), lastDuration.Round(time.Millisecond), lastErr)
+	}
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
+			if err := budgetForRetry(); err != nil {
+				return lastResult, err
+			}
 			emitAgentRetry(opts, name, lastLabel, attempt+1, maxRetries+1)
 			if err := transientBackoff(ctx, attempt); err != nil {
+				return lastResult, err
+			}
+			if err := budgetForRetry(); err != nil {
 				return lastResult, err
 			}
 		}
 		startedAt := time.Now()
 		result, err := runOnce()
-		emitAgentAttempt(opts, name, result, err, startedAt, time.Now())
+		completedAt := time.Now()
+		lastDuration = completedAt.Sub(startedAt)
+		emitAgentAttempt(opts, name, result, err, startedAt, completedAt)
 		if err == nil {
 			return result, nil
 		}
@@ -117,10 +139,19 @@ func cloneSessionRef(session *SessionRef) *SessionRef {
 }
 
 // claudeRetryClassifier retries both transient API errors and the
-// no-structured-output case that the existing loop already handled.
+// no-structured-output case that the existing loop already handled. When the
+// CLI reported the API error it ended on, that record alone decides: the
+// message text beside it is not classifier input.
 func claudeRetryClassifier(err error) (string, bool) {
 	if errors.Is(err, errNoStructuredOutput) {
 		return "missing structured output", true
+	}
+	var apiErr *claudeAPIError
+	if errors.As(err, &apiErr) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", false
+		}
+		return apiErr.classify()
 	}
 	return classifyTransient(err)
 }

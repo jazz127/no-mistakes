@@ -104,6 +104,8 @@ func ensureGitRepoTemplate(t *testing.T) {
 		}
 
 		run("init")
+		// Detached maintenance must not mutate the template while tests copy it.
+		run("config", "maintenance.auto", "false")
 		run("config", "user.name", "test")
 		run("config", "user.email", "test@test.com")
 		run("checkout", "-b", "main")
@@ -460,6 +462,24 @@ func fakeGlab(t *testing.T, mrViewJSON string) (env []string, logFile string) {
 		"FAKE_CLI_MR_VIEW_JSON": mrViewJSON,
 	})
 	return env, logFile
+}
+
+// fakeGlabWithMRState is fakeGlab with a stateful merge request: `mr create`
+// and `mr update` record the title and description they were given, and a later
+// `mr view` reads them back, which is what the PR step verifies a published
+// body against. It returns the env, the argv log, and the state file path.
+func fakeGlabWithMRState(t *testing.T) (env []string, logFile, stateFile string) {
+	t.Helper()
+	binDir := fakeCLIBinDir(t)
+	logFile = filepath.Join(t.TempDir(), "glab.log")
+	stateFile = filepath.Join(t.TempDir(), "mr-state.json")
+	linkTestBinary(t, binDir, "glab")
+	env = fakeCLIEnv(binDir, map[string]string{
+		"FAKE_CLI_MODE":          "glab",
+		"FAKE_CLI_LOG":           logFile,
+		"FAKE_CLI_MR_STATE_FILE": stateFile,
+	})
+	return env, logFile, stateFile
 }
 
 // newTestContextWithDBRecords is like newTestContext but also inserts

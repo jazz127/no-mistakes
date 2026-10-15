@@ -69,7 +69,7 @@ func (p *nativeAgentPipe) markDone() {
 // activity, when non-nil, is invoked on every non-empty read from either pipe;
 // see LifecyclePhaseActivity for why subprocess byte liveness - not assistant
 // prose - is the signal that distinguishes a working agent from a wedged one.
-func startNativeAgentCommand(cmd *exec.Cmd, activity func()) (*nativeAgentCommand, error) {
+func startNativeAgentCommand(cmd *exec.Cmd, activity func(), requireCompletedChildren bool) (*nativeAgentCommand, error) {
 	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
@@ -104,6 +104,14 @@ func startNativeAgentCommand(cmd *exec.Cmd, activity func()) (*nativeAgentComman
 	started.stderr = &nativeAgentPipe{file: stderrR, done: started.markPipeDone, activity: activity}
 	go func() {
 		err := shellenv.AttributeOOMKill(oomBase, oomOK, cmd.Wait())
+		if err == nil && requireCompletedChildren {
+			active, probeErr := shellenv.ShellCommandGroupActive(cmd)
+			if probeErr != nil {
+				err = fmt.Errorf("native check completion is unverified: %w", probeErr)
+			} else if active {
+				err = errors.New("native check completion is unverified: agent exited with active owned children")
+			}
+		}
 		started.terminate()
 		started.waitCh <- started.waitForPipes(err)
 	}()
