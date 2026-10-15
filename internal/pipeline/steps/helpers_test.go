@@ -104,6 +104,8 @@ func ensureGitRepoTemplate(t *testing.T) {
 		}
 
 		run("init")
+		// Detached maintenance must not mutate the template while tests copy it.
+		run("config", "maintenance.auto", "false")
 		run("config", "user.name", "test")
 		run("config", "user.email", "test@test.com")
 		run("checkout", "-b", "main")
