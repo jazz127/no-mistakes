@@ -332,6 +332,7 @@ func TestProviderPlugin_RepairFailsOnLogProtocolViolation(t *testing.T) {
 // unsettled repair push, which parks for approval; the plugin violation must
 // win, or a broken integration would read as a repair awaiting approval.
 func TestProviderPlugin_RepairFailsOnAttestationHandshakeViolation(t *testing.T) {
+	t.Parallel()
 	f := newCIRepairFixture(t, false, writeCIFix)
 	fakeProviderPlugin(t, f.sctx, fakeplugin.State{ProtocolVersion: 99})
 	f.sctx.PreviousFindings = `{"findings":[{"id":"ci-1","severity":"error","description":"failed","action":"auto-fix","category":"ci-check","check":"test"}]}`

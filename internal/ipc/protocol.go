@@ -9,6 +9,9 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 )
 
+// MaxFrameBytes is the existing scanner limit for IPC requests, responses, and events.
+const MaxFrameBytes = 1024 * 1024
+
 // JSON-RPC 2.0 method names.
 const (
 	MethodPushReceived              = "push_received"

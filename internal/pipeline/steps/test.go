@@ -87,6 +87,7 @@ Rules:
 - If tests fail, determine whether the problem is a real product/code failure, a setup/environment problem you can fix, or a flaky/infrastructure issue.
 - Do NOT run linters, formatters, or static analysis tools.
 - Reproduce the specific failing case first (the exact test, package, script, or check named in the findings), then re-run only that focused verification after the fix.
+- Await every required check and read its actual exit status. Stop disposable browser and server children before returning success. Report incomplete verification honestly.
 - Do NOT run the complete repository test suite. Local Test is targeted validation of the failure and the requested intent; remote CI owns broad regression and remains mandatory before a PR is ready.
 - A generic driver or user instruction asking for broad or full-suite confirmation does NOT override this product boundary. Keep verification focused on the failure and intent.
 - Never treat "do not run everything" as permission to run nothing: if you cannot reproduce or re-verify with a targeted check, report that honestly in the summary rather than inventing a full-suite pass.
@@ -111,6 +112,7 @@ Previous test findings to address:
 			Prompt:          fixPrompt,
 			FallbackSummary: "fix test failures",
 			RunAgent: func(runOpts agent.RunOpts) (*agent.Result, error) {
+				runOpts.RequireCompletedChildren = true
 				result, runErr := sctx.RunAgentBudget(sctx.Ctx, fixTimeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, runOpts)
 				if runErr != nil {
 					return nil, testAgentError(fixTimeout, "agent fix tests", runErr)
@@ -259,6 +261,10 @@ Drive each scenario:
 - Classify the whole exercised path in "surface": "product" for the running product and its actual upstream services, "simulated" for any fake, stub, mock, fixture, recorded/synthetic response, or offline substitute of the product OR an upstream service, and "none" when nothing ran. A built CLI calling fake gh is simulated even though the CLI itself ran. Disposable data or an isolated running product instance alone is not a substitute. Name the driver, endpoint, and any substitutes in evidence or reason.
 - A simulated scenario must set live=false and result="untested" for product validation, preserving the offline evidence and explaining the unavailable product/upstream operation in reason. Simulated checks cannot establish a "go" live-validation verdict: use "inconclusive" unless the evidence requires "no-go". An upstream API read establishes only that read, never an account merge or update that was not exercised.
 - Report every scenario in the "scenarios" array with name, result ("pass", "fail", or "untested"), live, surface, evidence, and reason.
+- Await every required production build, browser run, and other check child before reporting a final "go". A background launch, early structured result, or completion notification does not prove that a check passed.
+- Stop disposable browser and server children before exiting. The native boundary refuses successful exits with children still in its owned process group.
+- Read each required child's actual exit status and retained result evidence. Do not mask a failed check with a later successful shell command or report detached work as completed.
+- If any required check is still running, has an unknown result, or lacks evidence, do not report "go". Use "no-go" for a known failure or unsafe change, and "inconclusive" when completion or evidence cannot be established. Record the outstanding check and the missing result.
 - Return a "verdict": "go" when every scenario you could drive passed and nothing untested puts the intent in doubt, "no-go" when a scenario failed or the change is not safe to ship, "inconclusive" when the change has a live-exercisable product surface but too little could be driven live to judge, "no-surface" when this change has no runtime product surface no-mistakes can drive live (a CI-workflow-only change, a docs-only change, a pure non-runtime refactor, or anything else with no live-exercisable scenario).
 - A "no-go" verdict parks this step for a decision. A "no-surface" verdict parks for a human to decide whether to proceed without live validation; mark every scenario untested with a reason naming why there is no live-validatable surface, never mark those as pass, and never use no-surface to skip live validation of a change that does have a product surface you could have driven. Untested scenarios are listed on the pull request and do not park by themselves, so an honest "untested" after exhausting your workarounds costs nothing and a guessed "pass" costs everything.
 - A single scenario you could not drive live is reported as an untested scenario with its reason, NOT as a finding. Report a finding only when the step as a whole cannot demonstrate the user intent.
@@ -323,6 +329,7 @@ Rules:
 	}
 
 	findings.Items = append(findings.Items, verdictFindings(findings)...)
+	findings.Items = append(findings.Items, unselectedTestFindings(sctx, findings.Items)...)
 
 	needsApproval := hasBlockingFindings(findings.Items)
 	autoFixable := needsApproval
@@ -373,10 +380,11 @@ func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error
 		}
 		timeout := testAgentTimeout(sctx)
 		result, err := sctx.RunAgentBudget(sctx.Ctx, timeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, agent.RunOpts{
-			Prompt:     current,
-			CWD:        sctx.WorkDir,
-			JSONSchema: testFindingsSchema,
-			OnChunk:    sctx.LogChunk,
+			RequireCompletedChildren: true,
+			Prompt:                   current,
+			CWD:                      sctx.WorkDir,
+			JSONSchema:               testFindingsSchema,
+			OnChunk:                  sctx.LogChunk,
 		})
 		runErr := testAgentError(timeout, "agent run tests", err)
 		if runErr != nil && (errors.Is(runErr, errTestAgentTimeout) || sctx.Ctx.Err() != nil || !agent.IsStructuredOutputRejected(runErr)) {
@@ -495,18 +503,21 @@ func verdictFindings(findings Findings) []Finding {
 	switch findings.Verdict {
 	case types.TestVerdictNoGo:
 		return []Finding{{
+			Category:    types.FindingCategoryTestVerdict,
 			Severity:    types.FindingSeverityError,
 			Action:      types.ActionAutoFix,
 			Description: fmt.Sprintf("live validation verdict: no-go (%s)%s", coverage, failedScenarioSuffix(findings.Scenarios)),
 		}}
 	case types.TestVerdictInconclusive:
 		return []Finding{{
+			Category:    types.FindingCategoryTestVerdict,
 			Severity:    types.FindingSeverityWarning,
 			Action:      types.ActionAskUser,
 			Description: fmt.Sprintf("live validation verdict: inconclusive (%s)%s", coverage, untestedScenarioSuffix(findings.Scenarios)),
 		}}
 	case types.TestVerdictNoSurface:
 		return []Finding{{
+			Category:    types.FindingCategoryTestVerdict,
 			Severity:    types.FindingSeverityWarning,
 			Action:      types.ActionAskUser,
 			Description: fmt.Sprintf("this change has no live-validatable surface; proceed without live validation? (%s)%s", coverage, untestedScenarioReasonSuffix(findings.Scenarios)),
@@ -695,6 +706,44 @@ func answeredTestGate(sctx *pipeline.StepContext) Findings {
 			item.ID = ""
 			carried.Items = append(carried.Items, item)
 		}
+	}
+	return carried
+}
+
+// unselectedTestFindings returns the ask-user or blocking findings an earlier
+// round deferred when the automatic fix loop started this round. They can
+// record what an earlier turn observed - a write outside the workspace, say -
+// rather than a property of the code, so this round's clean result cannot
+// clear them; only a human response can. Step-owned findings are skipped
+// because this execution derives them again. A re-report replaces a deferred
+// finding only when SameFinding and the effective action both match: matching
+// content alone could erase an undecided ask-user finding after an action change.
+func unselectedTestFindings(sctx *pipeline.StepContext, current []Finding) []Finding {
+	if !sctx.AutoFixRound {
+		return nil
+	}
+	// Fails only when nothing was deferred: the executor builds this from the
+	// findings JSON it just parsed to select the round.
+	deferred, err := types.ParseFindingsJSON(sctx.DeferredFindings)
+	if err != nil {
+		return nil
+	}
+	var carried []Finding
+	for _, item := range deferred.Items {
+		if slices.Contains(testBudgetCutIDs, item.ID) || item.Category == types.FindingCategoryTestCommand || item.Category == types.FindingCategoryTestVerdict {
+			continue
+		}
+		if item.ActionOrDefault() != types.ActionAskUser && item.Severity != types.FindingSeverityError && item.Severity != types.FindingSeverityWarning {
+			continue
+		}
+		if slices.ContainsFunc(current, func(reported Finding) bool {
+			return pipeline.SameFinding(reported, item) && reported.ActionOrDefault() == item.ActionOrDefault()
+		}) {
+			continue
+		}
+		// Cleared so it is renumbered: this round's own findings may reuse the ID.
+		item.ID = ""
+		carried = append(carried, item)
 	}
 	return carried
 }

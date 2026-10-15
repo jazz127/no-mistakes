@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -23,6 +24,42 @@ const claudeMaxRetries = 3
 var errNoStructuredOutput = errors.New("claude returned no structured output")
 
 const claudeScannerMaxTokenSize = 256 * 1024 * 1024
+
+// claudeAPIErrorMessageMaxRunes bounds the CLI's API error text in a step
+// failure message.
+const claudeAPIErrorMessageMaxRunes = 400
+
+// claudeAPIError is the API error an invocation ended on, read from the
+// structured fields of the CLI's result event. The CLI writes that event once,
+// after its own retries, so an API error it recovered from never appears here.
+// The retry decision reads these fields and never the assistant text, which
+// can quote a status code or an error phrase of its own.
+type claudeAPIError struct {
+	Status  int
+	Message string
+	// UsageLimitReached records that the CLI's last rate_limit_event rejected
+	// the request. Such a 429 clears at the limit's reset time, not after a
+	// backoff.
+	UsageLimitReached bool
+}
+
+func (e *claudeAPIError) Error() string {
+	message := []rune(e.Message)
+	if len(message) > claudeAPIErrorMessageMaxRunes {
+		message = append(message[:claudeAPIErrorMessageMaxRunes], []rune("...")...)
+	}
+	return fmt.Sprintf("API error status %d: %s", e.Status, string(message))
+}
+
+func (e *claudeAPIError) classify() (string, bool) {
+	if e.UsageLimitReached || isTerminalRetryError(strings.ToLower(e.Message)) {
+		return "", false
+	}
+	if status := transientStatusRE.FindString(strconv.Itoa(e.Status)); status != "" {
+		return "http " + status, true
+	}
+	return "", false
+}
 
 // claudeAgent spawns the claude CLI for each invocation.
 type claudeAgent struct {
@@ -83,7 +120,7 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup
-	started, err := startNativeAgentCommand(cmd, nativeAgentActivityObserver(opts, "claude"))
+	started, err := startNativeAgentCommand(cmd, nativeAgentActivityObserver(opts, "claude"), opts.RequireCompletedChildren)
 	if err != nil {
 		return nil, fmt.Errorf("claude start: %w", err)
 	}
@@ -110,7 +147,7 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	waitErr := started.wait()
 	stderrWG.Wait()
 	if waitErr != nil {
-		retErr := fmt.Errorf("claude exited: %w: %s", waitErr, string(stderrBuf))
+		retErr := claudeExitError(waitErr, string(stderrBuf), result.terminalAPIError())
 		emitAgentExited(opts, "claude", pid, retErr)
 		return resultFromUsage(usage), retErr
 	}
@@ -146,6 +183,38 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 }
 
 func (a *claudeAgent) Close() error { return nil }
+
+func claudeExitError(waitErr error, stderr string, apiErr *claudeAPIError) error {
+	if apiErr == nil {
+		return fmt.Errorf("claude exited: %w: %s", waitErr, stderr)
+	}
+	if strings.TrimSpace(stderr) == "" {
+		return fmt.Errorf("claude exited: %w: %w", waitErr, apiErr)
+	}
+	return fmt.Errorf("claude exited: %w: %s: %w", waitErr, strings.TrimSpace(stderr), apiErr)
+}
+
+// terminalAPIError returns the API error the result event reports, or nil when
+// the invocation did not end on one. The fields are decoded apart from
+// claudeEvent so a change of their wire type costs only this diagnostic and
+// never the result event itself.
+func (r *claudeResult) terminalAPIError() *claudeAPIError {
+	if r == nil || !r.IsError {
+		return nil
+	}
+	var fields struct {
+		APIErrorStatus int    `json:"api_error_status"`
+		Result         string `json:"result"`
+	}
+	if err := json.Unmarshal(r.rawEvent, &fields); err != nil || fields.APIErrorStatus == 0 {
+		return nil
+	}
+	return &claudeAPIError{
+		Status:            fields.APIErrorStatus,
+		Message:           strings.Join(strings.Fields(fields.Result), " "),
+		UsageLimitReached: r.usageLimitReached,
+	}
+}
 
 func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage TokenUsage) (*Result, error) {
 	if result.IsError || result.Subtype != "success" {
@@ -272,6 +341,13 @@ type claudeEvent struct {
 	IsError          bool            `json:"is_error,omitempty"`
 	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
 	Usage            *claudeUsage    `json:"usage,omitempty"`
+
+	// rate_limit_event fields
+	RateLimitInfo *claudeRateLimitInfo `json:"rate_limit_info,omitempty"`
+}
+
+type claudeRateLimitInfo struct {
+	Status string `json:"status"`
 }
 
 // claudeResult captures the parsed result event.
@@ -283,6 +359,9 @@ type claudeResult struct {
 	rawEvent         json.RawMessage
 	sessionID        string // durable session identity from the event stream
 	model            string // model reported by assistant events
+	// usageLimitReached is true when the last rate_limit_event before the
+	// result rejected the request.
+	usageLimitReached bool
 }
 
 type claudeUsage struct {
@@ -313,7 +392,21 @@ type claudeMessage struct {
 type claudeContent struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
+
+	// tool_use fields
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
+
+	// tool_result fields
+	ToolUseID string `json:"tool_use_id,omitempty"`
+	IsError   bool   `json:"is_error,omitempty"`
 }
+
+// claudeStructuredOutputTool is the tool Claude Code exposes for submitting
+// the --json-schema payload. A run can call it several times; the latest
+// accepted call is the review's current state.
+const claudeStructuredOutputTool = "StructuredOutput"
 
 // parseClaudeEvents reads JSONL from the reader and dispatches events.
 // It accumulates token usage and captures the final result event.
@@ -323,7 +416,13 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 	var textBuf string
 	var lastSessionID string
 	var lastModel string
+	var usageLimitReached bool
 	usageByMsg := make(map[string]TokenUsage)
+	// A terminal result event can carry only prose after background work
+	// completes, so the latest accepted StructuredOutput submission is kept
+	// and used when the result event has no structured payload of its own.
+	pendingSubmissions := make(map[string]json.RawMessage)
+	var lastSubmission json.RawMessage
 
 	for scanner.Scan() {
 		select {
@@ -364,6 +463,33 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 						onChunk(c.Text)
 					}
 				}
+				if c.Type == "tool_use" && c.Name == claudeStructuredOutputTool && c.ID != "" && len(c.Input) > 0 {
+					pendingSubmissions[c.ID] = c.Input
+				}
+			}
+
+		case "user":
+			var msg claudeMessage
+			if err := json.Unmarshal(event.Message, &msg); err != nil {
+				continue
+			}
+			for _, c := range msg.Content {
+				if c.Type != "tool_result" {
+					continue
+				}
+				input, ok := pendingSubmissions[c.ToolUseID]
+				if !ok {
+					continue
+				}
+				delete(pendingSubmissions, c.ToolUseID)
+				if !c.IsError {
+					lastSubmission = input
+				}
+			}
+
+		case "rate_limit_event":
+			if event.RateLimitInfo != nil {
+				usageLimitReached = event.RateLimitInfo.Status == "rejected"
 			}
 
 		case "result":
@@ -374,14 +500,22 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			if result != nil {
 				raw := make(json.RawMessage, len(line))
 				copy(raw, line)
+				structured := event.StructuredOutput
+				if len(structured) == 0 || string(structured) == "null" {
+					structured = lastSubmission
+				} else {
+					lastSubmission = structured
+				}
 				*result = &claudeResult{
 					Subtype:          event.Subtype,
 					IsError:          event.IsError,
-					StructuredOutput: event.StructuredOutput,
+					StructuredOutput: structured,
 					text:             textBuf,
 					rawEvent:         raw,
 					sessionID:        lastSessionID,
 					model:            lastModel,
+
+					usageLimitReached: usageLimitReached,
 				}
 			}
 		}

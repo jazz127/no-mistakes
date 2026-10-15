@@ -55,7 +55,7 @@ type updater struct {
 	stderr             io.Writer
 	now                func() time.Time
 	spawnBackground    func(currentVersion string) error
-	resetDaemon        func() error
+	resetDaemon        func(daemonExpected bool) error
 	paths              *paths.Paths
 	disableBackground  bool
 	nixStoreInstall    bool
@@ -138,8 +138,8 @@ func defaultUpdater(stdout, stderr io.Writer) (*updater, error) {
 		now:             time.Now,
 		paths:           p,
 		spawnBackground: defaultSpawnBackground,
-		resetDaemon: func() error {
-			return defaultResetDaemon(p)
+		resetDaemon: func(daemonExpected bool) error {
+			return defaultResetDaemon(p, daemonExpected)
 		},
 	}, nil
 }
@@ -221,6 +221,7 @@ func (u *updater) run(ctx context.Context) error {
 	if err := u.confirmActiveRunsBeforeUpdate(); err != nil {
 		return err
 	}
+	daemonExpected := u.paths != nil && daemonArtifactsExist(u.paths)
 	if err := u.ensureDaemonUsesCurrentExecutable(); err != nil {
 		return err
 	}
@@ -252,7 +253,7 @@ func (u *updater) run(ctx context.Context) error {
 		return err
 	}
 	if u.resetDaemon != nil {
-		if err := u.resetDaemon(); err != nil {
+		if err := u.resetDaemon(daemonExpected); err != nil {
 			var resetErr *daemonResetError
 			if errors.As(err, &resetErr) && resetErr.daemonOffline {
 				return fmt.Errorf("updated %s to %s, but daemon is offline: %w", u.appName, plan.LatestVersion, err)

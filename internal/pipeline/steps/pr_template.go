@@ -36,7 +36,7 @@ func supportsPRTemplates(provider scm.Provider) bool {
 		return true
 	}
 	switch provider {
-	case scm.ProviderGitHub, scm.ProviderGitLab, scm.ProviderGitea, scm.ProviderForgejo, scm.ProviderAzureDevOps, scm.ProviderBitbucket:
+	case scm.ProviderGitHub, scm.ProviderGitLab, scm.ProviderGitea, scm.ProviderForgejo, scm.ProviderAzureDevOps, scm.ProviderBitbucket, scm.ProviderOrigin:
 		return true
 	default:
 		return false
@@ -104,6 +104,7 @@ func (s *PRStep) draftTemplateNarrative(sctx *pipeline.StepContext, branch, base
 	if err != nil {
 		return prContent{}, fmt.Errorf("read final branch diff: %w", err)
 	}
+	inventory := prPromptInventory(sctx, paths, baseSHA)
 	// JSON quoting delimits the trusted template without inventing a template
 	// language. It supplies prose instructions/structure, never recorded facts.
 	quoted, _ := json.Marshal(template)
@@ -128,7 +129,7 @@ Trusted repository template (JSON string):
 %s
 
 Final diff paths and statuses:
-%s%s%s`, branch, baseBranch, baseSHA, sctx.Run.HeadSHA, titleRules, scopeRules, quoted, paths, prDraftIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
+%s%s%s`, branch, baseBranch, baseSHA, sctx.Run.HeadSHA, titleRules, scopeRules, quoted, inventory, prDraftIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
 	prompt += agent.MemoryFilesRule
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{Prompt: prompt, CWD: sctx.WorkDir, JSONSchema: templatePRContentSchema, OnChunk: sctx.LogChunk})
 	if err != nil {
@@ -200,9 +201,9 @@ func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provid
 	}
 	parts := []string{}
 	if intent := publicPRIntent(sctx); intent != "" {
-		parts = append(parts, "## Intent\n\n"+neutralizeAttestationMarkers(intent))
+		parts = append(parts, "## Intent\n\n"+neutralizeAttestationMarkers(provider, intent))
 	}
-	if evidence := appendixEvidence(appendixMode(sctx), prBodyFlavorFor(provider), risk, testing, pipelineMD); evidence != "" {
+	if evidence := appendixEvidence(appendixMode(sctx), prBodyFlavorFor(provider), risk, testing, pipelineMD, provider); evidence != "" {
 		parts = append(parts, evidence)
 	}
 	return strings.Join(parts, "\n\n"), nil

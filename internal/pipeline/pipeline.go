@@ -13,6 +13,15 @@ import (
 
 var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 
+// ErrDaemonShutdown is the cancellation cause RunManager.Shutdown gives every
+// active run.
+var ErrDaemonShutdown = errors.New("daemon shutting down")
+
+// ErrParkedAtShutdown is returned when a daemon shutdown reached a run that was
+// fully recorded as waiting at an approval gate. The run keeps that record so
+// the next start resumes it, as it would after a crash.
+var ErrParkedAtShutdown = errors.New("run left parked at an approval gate by daemon shutdown")
+
 // StepContext provides shared resources to pipeline steps during execution.
 type StepContext struct {
 	Ctx              context.Context
@@ -59,6 +68,11 @@ type StepContext struct {
 	CarriedFindings  string
 	PreviousFindings string // JSON findings selected for the current fix round
 	DeferredFindings string // JSON findings left unselected when the current fix round began
+	// AutoFixRound is true when the automatic fix loop, not a human response,
+	// started the current fix round. Only then do DeferredFindings hold
+	// findings nobody has decided on: a human fix response accounts for every
+	// finding it leaves unselected as an explicit decline.
+	AutoFixRound bool
 	// StepResultID is the DB row ID of the current step's step_results record.
 	// Steps use it to query their own round history for multi-round prompts.
 	StepResultID string

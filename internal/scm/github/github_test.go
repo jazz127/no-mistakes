@@ -1159,6 +1159,40 @@ func TestPRStateAndMergeableTargetKnownPRByURL(t *testing.T) {
 	}
 }
 
+// A conflict-free PR behind a base that requires up-to-date branches reads
+// mergeable MERGEABLE, so only mergeStateStatus says GitHub will refuse it.
+func TestGetMergeableStateReadsMergeStateStatusBehind(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		out  string
+		want scm.MergeableState
+	}{
+		{"MERGEABLE BEHIND\n", scm.MergeableBehind},
+		{"MERGEABLE CLEAN\n", scm.MergeableOK},
+		{"MERGEABLE BLOCKED\n", scm.MergeableOK},
+		{"MERGEABLE\n", scm.MergeableOK},
+		{"CONFLICTING DIRTY\n", scm.MergeableConflict},
+		{"CONFLICTING BEHIND\n", scm.MergeableConflict},
+		{"UNKNOWN UNKNOWN\n", scm.MergeablePending},
+		{"UNKNOWN BEHIND\n", scm.MergeablePending},
+		{"\n", scm.MergeablePending},
+	} {
+		var args [][]string
+		host := New(recordingCmdFactory(tc.out, &args), nil, "", "test/repo")
+		got, err := host.GetMergeableState(context.Background(), &scm.PR{Number: "7"})
+		if err != nil {
+			t.Fatalf("GetMergeableState(%q) error = %v", tc.out, err)
+		}
+		if got != tc.want {
+			t.Errorf("GetMergeableState(%q) = %q, want %q", tc.out, got, tc.want)
+		}
+		if joined := strings.Join(args[0], " "); !strings.Contains(joined, "--json mergeable,mergeStateStatus") {
+			t.Fatalf("GetMergeableState args = %q, want mergeStateStatus requested", joined)
+		}
+	}
+}
+
 func TestGetChecksParsesCompletedAt(t *testing.T) {
 	t.Parallel()
 
@@ -1995,5 +2029,113 @@ func TestGetPRContentRequiresExplicitStrings(t *testing.T) {
 	got, err := host.GetPRContent(context.Background(), &scm.PR{Number: "42"})
 	if err != nil || got.Title != "Author title" || got.Body != "" {
 		t.Fatalf("explicit empty body rejected: %+v, %v", got, err)
+	}
+}
+
+func TestFindPRIgnoresStderrNoticeOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr list --head feature/refactor --base main --state open --json number,url,baseRefName": {
+			stdout: `[{"number":42,"url":"https://github.example.com/org/repo/pull/42","baseRefName":"main"}]` + "\n",
+			stderr: "wrapper: using cached credentials\n",
+		},
+	}), nil, "", "")
+
+	pr, err := host.FindPR(context.Background(), "feature/refactor", "main")
+	if err != nil {
+		t.Fatalf("FindPR() error = %v", err)
+	}
+	if pr == nil || pr.Number != "42" {
+		t.Fatalf("FindPR() PR = %+v, want #42", pr)
+	}
+}
+
+func TestCreatePRIgnoresStderrNoticeOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr create --head feature/notice --base main --repo test/repo --title fix: notice --body-file -": {
+			stdout:    "https://github.com/test/repo/pull/42\n",
+			stderr:    "wrapper: using cached credentials\n",
+			wantStdin: "body",
+		},
+	}), nil, "", "test/repo")
+
+	pr, err := host.CreatePR(context.Background(), "feature/notice", "main", scm.PRContent{Title: "fix: notice", Body: "body"})
+	if err != nil {
+		t.Fatalf("CreatePR() error = %v", err)
+	}
+	if pr == nil || pr.URL != "https://github.com/test/repo/pull/42" || pr.Number != "42" {
+		t.Fatalf("CreatePR() PR = %+v, want the bare PR URL and #42", pr)
+	}
+}
+
+func TestGetChecksIgnoresStderrNoticeOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
+			stdout: `[{"name":"build","state":"SUCCESS","bucket":"pass"}]` + "\n",
+			stderr: "wrapper: using cached credentials\n",
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 1 || checks[0].Name != "build" {
+		t.Fatalf("checks = %+v, want single build check", checks)
+	}
+}
+
+func TestGetChecksTreatsNoChecksReportedOnStderrAsEmpty(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
+			stderr: "no checks reported on the 'feature' branch\n",
+			code:   1,
+		},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 0 {
+		t.Fatalf("checks = %+v, want none", checks)
+	}
+}
+
+func TestStdoutOnlyFailureDetail(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		stdout string
+		stderr string
+		want   string
+	}{
+		{name: "stderr only", stderr: "  stderr failure \n", want: "stderr failure"},
+		{name: "stdout only", stdout: "\n stdout failure  \n", want: "stdout failure"},
+		{name: "both prefers stderr", stdout: "stdout noise\n", stderr: "stderr failure\n", want: "stderr failure"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cmd := githubTestCmdFactory(map[string]githubTestResponse{
+				"gh probe": {stdout: tt.stdout, stderr: tt.stderr, code: 1},
+			})(context.Background(), "gh", "probe")
+			_, detail, err := stdoutOnly(cmd)
+			if err == nil {
+				t.Fatal("stdoutOnly() error = nil, want the exit error")
+			}
+			if detail != tt.want {
+				t.Fatalf("detail = %q, want %q", detail, tt.want)
+			}
+		})
 	}
 }

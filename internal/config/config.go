@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
@@ -99,6 +100,19 @@ const (
 	// show that - every merge-conflict repair, since a rebase rewrites the
 	// head - revalidates from Review instead. See CI.RevalidateRepairs.
 	DefaultCIRevalidateRepairs = false
+	// CIReviewBotCommentsOnFailure reads a registered review bot's unresolved
+	// comments only when that bot's check failed.
+	CIReviewBotCommentsOnFailure = "on_failure"
+	// CIReviewBotCommentsAlways also reads them when the bot's check completed
+	// green on the current head, or has not registered on it yet once every
+	// other check is green.
+	CIReviewBotCommentsAlways = "always"
+	// DefaultCIReviewBotComments is the policy the CI step uses when
+	// ci.review_bot_comments is unset. It is "on_failure" because reading a
+	// green check's comments makes an unresolved bot comment block
+	// checks-passed, which is a new default no installation asked for; a
+	// repository opts in with "always".
+	DefaultCIReviewBotComments = CIReviewBotCommentsOnFailure
 	// RebaseStrategyRebase replays the branch on top of the moved base. It is
 	// the historical behavior and the default.
 	RebaseStrategyRebase = "rebase"
@@ -324,9 +338,11 @@ type OperatorReviewRaw struct {
 	PathInstructions []PathInstruction `yaml:"path_instructions"`
 }
 
-// RepositoryPRRaw contains machine-local per-repository PR title settings.
+// RepositoryPRRaw contains machine-local per-repository PR defaults.
 type RepositoryPRRaw struct {
 	TitleFormat *string `yaml:"title_format"`
+	Template    string  `yaml:"template"`
+	Appendix    string  `yaml:"appendix"`
 }
 
 // RepositoryOverrides maps remote URLs to machine-local per-repository settings.
@@ -648,13 +664,14 @@ type Commands struct {
 // AutoFixRaw is the YAML representation of auto-fix config.
 // Pointer fields distinguish "not set" (nil) from "set to 0" (disabled).
 type AutoFixRaw struct {
-	Lint     *int `yaml:"lint"`
-	Test     *int `yaml:"test"`
-	Review   *int `yaml:"review"`
-	Document *int `yaml:"document"`
-	CI       *int `yaml:"ci"`
-	Babysit  *int `yaml:"babysit"`
-	Rebase   *int `yaml:"rebase"`
+	Lint     *int          `yaml:"lint"`
+	Test     *int          `yaml:"test"`
+	Review   *int          `yaml:"review"`
+	Document *int          `yaml:"document"`
+	CI       *int          `yaml:"ci"`
+	Babysit  *int          `yaml:"babysit"`
+	Rebase   *int          `yaml:"rebase"`
+	Gates    GateFixLimits `yaml:"gates"`
 }
 
 // CIRaw is the YAML representation of CI-step settings.
@@ -665,6 +682,12 @@ type CIRaw struct {
 	// config can override a global `true`, which a plain bool could not
 	// express (it would be indistinguishable from "not set").
 	RevalidateRepairs *bool `yaml:"revalidate_repairs"`
+	// ReviewBotComments is "" when unset; see CI.ReviewBotComments.
+	ReviewBotComments string `yaml:"review_bot_comments"`
+	// RebaseBehind is a pointer for the same reason as RevalidateRepairs.
+	RebaseBehind *bool `yaml:"rebase_behind"`
+	// CarryReviewOnReplay is a pointer for the same reason as RevalidateRepairs.
+	CarryReviewOnReplay *bool `yaml:"carry_review_on_replay"`
 }
 
 // CI holds the resolved CI-step settings.
@@ -702,6 +725,41 @@ type CI struct {
 	// materially more expensive in wall-clock time and tokens - which is why
 	// it is opt-in (see VISION.md).
 	RevalidateRepairs bool
+	// ReviewBotComments selects when the CI step reads a registered review
+	// bot's (scm.ReviewBots) unresolved review comments.
+	//
+	// "on_failure" (default): only when the bot's check failed, so a green
+	// bot check never blocks checks-passed.
+	//
+	// "always": also when the bot's check completed green on the current
+	// head, or has not registered on it yet once every other check is green.
+	// Its unresolved comments then become the same ask-user findings a
+	// red check produces, and the step parks for a decision instead of
+	// reporting checks-passed. A review bot can conclude its check success
+	// while leaving an unresolved comment, most often on the pipeline's own
+	// CI repair commit, which no human has reviewed yet.
+	ReviewBotComments string
+	// RebaseBehind opts the CI monitor into rebasing a green GitHub PR that
+	// reports mergeStateStatus BEHIND (its base requires branches to be up to
+	// date) through the merge-conflict repair, which revalidates from Review.
+	// Off by default: each base advance would then cost another full pass, so
+	// a green BEHIND PR reports checks-passed and waits for a human to bring
+	// it up to date (see VISION.md's cost rule).
+	RebaseBehind bool
+	// CarryReviewOnReplay opts a CI rebase repair that is a provable pure
+	// replay into keeping the run's review approval: when the repaired head
+	// is the reviewed commits replayed onto the resolved base tip - a linear
+	// chain of the same length, each commit replaying onto its new parent with
+	// no conflict to exactly its recorded tree, and each one patch-identical
+	// (`git patch-id --verbatim`) to the reviewed commit it replaced - the
+	// approval moves to the replayed head and validation restarts at Test
+	// instead of Review. Anything that fails any part of that proof, or any
+	// error while checking it, takes today's path and revalidates from Review.
+	//
+	// Off by default. It has no effect when RevalidateRepairs is true, which
+	// keeps meaning "every repair re-passes Review", or when the run has a
+	// review-anchored gate, which would otherwise be skipped for the new head.
+	CarryReviewOnReplay bool
 }
 
 // RebaseRaw is the YAML representation of rebase-step settings.
@@ -745,6 +803,7 @@ type AutoFix struct {
 	Document int
 	CI       int
 	Rebase   int
+	Gates    GateFixLimits
 }
 
 // Config is the merged result of global + per-repo configuration.
@@ -818,6 +877,7 @@ type ProvidersRaw struct {
 	GitLab      GitLabProviderRaw      `yaml:"gitlab"`
 	Bitbucket   BitbucketProviderRaw   `yaml:"bitbucket"`
 	AzureDevOps AzureDevOpsProviderRaw `yaml:"azuredevops"`
+	Origin      OriginProviderRaw      `yaml:"origin"`
 }
 
 // GitHubProviderRaw is the YAML representation of GitHub provider settings.
@@ -892,12 +952,19 @@ type AzureDevOpsProviderRaw struct {
 	DraftPullRequests *bool `yaml:"draft_pull_requests"`
 }
 
+// OriginProviderRaw is the YAML representation of Cursor Origin provider
+// settings. Pointer fields distinguish "not set" (nil) from an explicit false.
+type OriginProviderRaw struct {
+	DraftPullRequests *bool `yaml:"draft_pull_requests"`
+}
+
 // Providers holds resolved provider-specific settings.
 type Providers struct {
 	GitHub      GitHubProvider
 	GitLab      GitLabProvider
 	Bitbucket   BitbucketProvider
 	AzureDevOps AzureDevOpsProvider
+	Origin      OriginProvider
 }
 
 // GitHubProvider holds resolved GitHub provider settings.
@@ -928,6 +995,14 @@ type BitbucketProvider struct {
 type AzureDevOpsProvider struct {
 	// DraftPullRequests opens created Azure DevOps PRs as drafts
 	// (az repos pr create --draft true). Default false.
+	DraftPullRequests bool
+}
+
+// OriginProvider holds resolved Cursor Origin provider settings.
+type OriginProvider struct {
+	// DraftPullRequests opens created Origin PRs as drafts
+	// (`origin pr create --status draft`). Default false, which passes
+	// `--status open` because Origin's CLI otherwise defaults to draft.
 	DraftPullRequests bool
 }
 
@@ -1099,6 +1174,9 @@ type EvidenceRaw struct {
 	// EffectiveRepoConfig): a contributor's pushed branch must not be able to
 	// aim evidence commits at another branch of the repository.
 	Branch *string `yaml:"branch"`
+	// CommitMessage templates the evidence-branch commit subject. Like
+	// commit.fix_message it only shapes a message, so it is pushed-readable.
+	CommitMessage *string `yaml:"commit_message"`
 	// LocalRoot, Retention, and MaxRuns describe this MACHINE's evidence
 	// storage: where the daemon writes artifacts on local disk and how long it
 	// keeps them. They are global-only - Merge resolves them straight from
@@ -1138,6 +1216,9 @@ type Evidence struct {
 	AttachMedia bool
 	Dir         string
 	Branch      string
+	// CommitMessage is the configured subject template; empty keeps the
+	// built-in subject (see RenderCommitMessage).
+	CommitMessage string
 	// LocalRoot overrides the app-root default for on-disk evidence; empty
 	// means paths.EvidenceDir(). Retention and MaxRuns bound how much of it
 	// survives: no-mistakes reaps its own evidence rather than leaving that to
@@ -1368,9 +1449,10 @@ forgejo_axi_path: forgejo-axi
 #   devin: devin acp
 
 # Maximum time the CI monitor babysits an open PR with no base-branch movement
-# before giving up. The monitor watches CI and auto-rebases when the base branch
-# advances; each base advance re-arms this timer, so an actively-updated green PR
-# keeps its monitor. Set to "unlimited", "none", "off", "never", or any
+# before giving up. The monitor watches CI and rebases the PR onto its base when
+# it has a merge conflict (or, with ci.rebase_behind, when GitHub reports it
+# green but BEHIND); each base advance re-arms this timer, so an
+# actively-updated green PR keeps its monitor. Set to "unlimited", "none", "off", "never", or any
 # non-positive duration to monitor until the PR is merged, closed, or the run is
 # aborted with: no-mistakes axi abort --run <id>
 ci_timeout: "168h"
@@ -1530,8 +1612,35 @@ ci:
   # repository that sets ci.revalidate_repairs on its own default branch
   # overrides this value.
   revalidate_repairs: false
+  # When the CI step reads a registered review bot's (Greptile's) unresolved
+  # review comments. "on_failure" (default) reads them only when the bot's
+  # check failed. "always" also reads them when the bot's check completed green
+  # on the current head, or has not registered on it yet once every other check
+  # is green, so an unresolved bot comment parks the step for a decision
+  # instead of reporting checks-passed. A repository that sets
+  # ci.review_bot_comments on its own default branch overrides this value.
+  review_bot_comments: on_failure
+  # Whether the CI monitor rebases a green GitHub PR that GitHub reports BEHIND
+  # because its base requires branches to be up to date. Defaults to false: the
+  # PR reports checks-passed and waits for a human to bring it up to date. Set
+  # true to have the monitor rebase it once the base holds still for one poll;
+  # each such rebase revalidates from Review, so it costs another full pipeline
+  # pass. A repository that sets ci.rebase_behind on its own default branch
+  # overrides this value.
+  rebase_behind: false
+  # Whether a CI rebase repair that only replayed the reviewed commits keeps
+  # its review approval. Defaults to false: every rebase repair revalidates
+  # from Review. Set true to restart at Test instead when the rebase is a
+  # provable pure replay - every reviewed commit replayed without a conflict
+  # and patch-identical to the one it replaced. Anything else still
+  # revalidates from Review. No effect when revalidate_repairs is true. A
+  # repository that sets ci.carry_review_on_replay on its own default branch
+  # overrides this value.
+  carry_review_on_replay: false
 
 # Auto-fix commit subject template. Available variables: {{.Step}}, {{.Summary}}, and {{.Branch}}.
+# When set to anything but the default, it also renders the Push step's
+# catch-all commit (step "push", summary "apply agent fixes").
 # {{.Branch}} is the normalized branch name, or the only capture group from
 # branch_pattern when configured. A branch pattern with no match fails safely.
 # Global-only branch_replacement can add literal text around that group with ${1}.
@@ -1578,12 +1687,15 @@ intent:
 # directory to another disk and must be an absolute path. These three are
 # global-only - a repository's .no-mistakes.yaml cannot change where this
 # machine writes evidence or how long it keeps it.
+# commit_message templates the evidence-branch commit subject with
+# {{.Branch}} and {{.RunID}}; it follows commit.fix_message's template rules.
 # test:
 #   evidence:
 #     store_in_repo: true
 #     attach_media: true
 #     dir: .no-mistakes/evidence
 #     branch: no-mistakes/evidence
+#     commit_message: "no-mistakes: evidence for {{.Branch}} (run {{.RunID}})"
 #     local_root: /var/lib/no-mistakes/evidence
 #     retention: 720h
 #     max_runs: 50
@@ -2438,6 +2550,17 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	var repoOnly struct {
+		AutoFix struct {
+			Gates yaml.Node `yaml:"gates"`
+		} `yaml:"auto_fix"`
+	}
+	if err := yaml.Unmarshal(data, &repoOnly); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	if !repoOnly.AutoFix.Gates.IsZero() {
+		return nil, fmt.Errorf("auto_fix.gates is repository-only; configure it on the trusted default branch")
+	}
 	if err := validateGlobalCommitRaw(raw.Commit); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
@@ -2451,6 +2574,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 	if err := validateRebaseRaw(raw.Rebase); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	if err := validateCIRaw(raw.CI); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 	warnRetiredJev(raw.Jev)
@@ -2785,7 +2911,13 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if err := validateGates(cfg.Gates); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
+	if err := validateGateFixLimits(cfg.AutoFix.Gates, cfg.Gates); err != nil {
+		return nil, fmt.Errorf("parse repo config: %w", err)
+	}
 	if err := validateRebaseRaw(cfg.Rebase); err != nil {
+		return nil, fmt.Errorf("parse repo config: %w", err)
+	}
+	if err := validateCIRaw(cfg.CI); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
 	cfg.PR.BaseBranch = strings.TrimSpace(cfg.PR.BaseBranch)
@@ -2926,7 +3058,8 @@ func validatePathInstructionGlob(pattern string) error {
 // documentation rules that gate itself. Review (the path-scoped guidance
 // injected into the review gate prompt) is trusted-only for the same reason: a
 // pushed branch must not steer the reviewer that gates it. Gates (extra
-// repository-declared shell checks) are trusted-only for the same reason.
+// repository-declared shell checks) and AutoFix.Gates are trusted-only for the
+// same reason.
 // DisableProjectSettings
 // is also trusted-only so a pushed branch cannot enable or defeat the gate-agent
 // project-instruction boundary. NoCI is trusted-only so a pushed branch cannot
@@ -2948,7 +3081,7 @@ func validatePathInstructionGlob(pattern string) error {
 // branch - this blocks the supply-chain vector for repos that ship
 // .no-mistakes.yaml only on feature branches.
 //
-// Non-executing fields (ignore patterns, auto-fix, commit, intent, test,
+// Non-executing fields (ignore patterns, core-step auto-fix, commit, intent, test,
 // PR title format, and providers) are always taken from the pushed copy, matching prior behavior,
 // since they cannot run arbitrary shell, select a process, or spend the
 // maintainer's CI minutes.
@@ -2984,6 +3117,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// branch re-running its own suite, never a branch authoring the extra
 		// check that clears it.
 		effective.Gates = copyGates(trusted.Gates)
+		effective.AutoFix.Gates = maps.Clone(trusted.AutoFix.Gates)
 		// disable_project_settings is a security boundary: honor it ONLY from the
 		// trusted default-branch copy so a pushed branch cannot turn the opt-out
 		// off (and re-enable its own AGENTS.md) or on. A nil trusted copy here
@@ -3002,6 +3136,12 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// sense: it decides whether a CI repair commit must re-pass Review
 		// before it is published, so a pushed branch must not be able to turn
 		// the maintainer's revalidation requirement off for its own repairs.
+		// ci.review_bot_comments decides whether a green review-bot check
+		// can still block checks-passed, so a pushed branch must not be able
+		// to silence the bot's unresolved comments on itself.
+		// ci.carry_review_on_replay decides whether a rebased head may skip
+		// Review, so a pushed branch must not be able to opt its own rebases
+		// out of the maintainer's review.
 		effective.CI = trusted.CI
 		// rebase.strategy is gate-control in the same sense no_ci is. It decides
 		// whether integrating a moved base leaves an auditable merge commit
@@ -3014,7 +3154,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// test.evidence.branch names the git ref evidence commits are pushed
 		// to with the maintainer's credentials. It is trusted-only so a pushed
 		// branch cannot aim them at another branch of the repository; the rest
-		// of test.evidence (store_in_repo, attach_media, dir) stays
+		// of test.evidence (store_in_repo, attach_media, dir, commit_message) stays
 		// pushed-readable because it only picks how artifacts are published.
 		// The publisher independently refuses any branch without its marker
 		// file, and the upload client refuses Actions/App installation tokens,
@@ -3055,6 +3195,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.ProtectedPaths = nil
 		effective.Review = ReviewRaw{}
 		effective.Gates = nil
+		effective.AutoFix.Gates = nil
 		effective.DisableProjectSettings = false
 		effective.NoCI = false
 		effective.CI = CIRaw{}
@@ -3175,6 +3316,9 @@ func applyTestOverrides(dst *Test, src *TestRaw) {
 		if branch, err := evidence.NormalizeBranch(*src.Evidence.Branch); err == nil {
 			dst.Evidence.Branch = branch
 		}
+	}
+	if src.Evidence.CommitMessage != nil {
+		dst.Evidence.CommitMessage = *src.Evidence.CommitMessage
 	}
 }
 
@@ -3328,6 +3472,11 @@ func validateTestRaw(test TestRaw) error {
 			return fmt.Errorf("test.evidence.branch: %w", err)
 		}
 	}
+	if test.Evidence.CommitMessage != nil {
+		if _, err := renderEvidenceMessage(*test.Evidence.CommitMessage, "branch", "run"); err != nil {
+			return err
+		}
+	}
 	// local_root must be absolute. The daemon's working directory is a bare
 	// gate repository, so a relative path would resolve somewhere the operator
 	// never named - and evidence would silently scatter instead of landing
@@ -3367,6 +3516,9 @@ func applyProvidersOverrides(dst *Providers, src *ProvidersRaw) {
 	if src.AzureDevOps.DraftPullRequests != nil {
 		dst.AzureDevOps.DraftPullRequests = *src.AzureDevOps.DraftPullRequests
 	}
+	if src.Origin.DraftPullRequests != nil {
+		dst.Origin.DraftPullRequests = *src.Origin.DraftPullRequests
+	}
 }
 
 // autoFixDefaults returns the default auto-fix configuration.
@@ -3393,6 +3545,7 @@ func ciDefaults() CI {
 	return CI{
 		RerunTransient:    DefaultCIRerunTransient,
 		RevalidateRepairs: DefaultCIRevalidateRepairs,
+		ReviewBotComments: DefaultCIReviewBotComments,
 	}
 }
 
@@ -3437,6 +3590,27 @@ func applyCIOverrides(dst *CI, src *CIRaw) {
 	if src.RevalidateRepairs != nil {
 		dst.RevalidateRepairs = *src.RevalidateRepairs
 	}
+	if v := strings.TrimSpace(src.ReviewBotComments); v != "" {
+		dst.ReviewBotComments = v
+	}
+	if src.RebaseBehind != nil {
+		dst.RebaseBehind = *src.RebaseBehind
+	}
+	if src.CarryReviewOnReplay != nil {
+		dst.CarryReviewOnReplay = *src.CarryReviewOnReplay
+	}
+}
+
+// validateCIRaw fails the config closed on an unrecognized
+// ci.review_bot_comments. Falling back to the default would let a typo
+// ("allways") quietly keep reporting green over comments a maintainer asked
+// to see.
+func validateCIRaw(c CIRaw) error {
+	switch strings.TrimSpace(c.ReviewBotComments) {
+	case "", CIReviewBotCommentsOnFailure, CIReviewBotCommentsAlways:
+		return nil
+	}
+	return fmt.Errorf("ci.review_bot_comments: %q is not a valid policy (want %q or %q)", c.ReviewBotComments, CIReviewBotCommentsOnFailure, CIReviewBotCommentsAlways)
 }
 
 // applyAutoFixOverrides applies non-nil raw values onto resolved defaults.
@@ -3464,6 +3638,9 @@ func applyAutoFixOverrides(dst *AutoFix, src *AutoFixRaw) {
 // AutoFixLimit returns the max auto-fix attempts for a given step.
 // Steps without auto-fix support return 0.
 func (c *Config) AutoFixLimit(step types.StepName) int {
+	if step.IsCustomGate() {
+		return c.AutoFix.Gates[step.CustomGateLabel()]
+	}
 	switch step {
 	case types.StepLint:
 		return c.AutoFix.Lint
@@ -3508,6 +3685,8 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	af := autoFixDefaults()
 	applyAutoFixOverrides(&af, &global.AutoFix)
 	applyAutoFixOverrides(&af, &repo.AutoFix)
+	// Gate budgets are repository-only, unlike the core step budgets.
+	af.Gates = maps.Clone(repo.AutoFix.Gates)
 
 	ci := ciDefaults()
 	// The operator's global value is a machine-wide floor they can always set;
@@ -3595,8 +3774,16 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		PublishIntent: repo.PR.PublishIntent,
 		Appendix:      repo.PR.Appendix,
 	}
-	if override != nil && override.PR.TitleFormat != nil {
-		pr.TitleFormat = *override.PR.TitleFormat
+	if override != nil {
+		if override.PR.TitleFormat != nil {
+			pr.TitleFormat = *override.PR.TitleFormat
+		}
+		if pr.Template == "" {
+			pr.Template = override.PR.Template
+		}
+		if pr.Appendix == "" {
+			pr.Appendix = override.PR.Appendix
+		}
 	}
 	if repo.PR.TitleFormat != nil {
 		pr.TitleFormat = *repo.PR.TitleFormat

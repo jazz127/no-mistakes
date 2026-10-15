@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -78,11 +79,19 @@ func durationFromEnv(name string, fallback time.Duration) time.Duration {
 // what lets users pick up env-var changes (see #143 for the PATH fix) with
 // a plain `daemon start` instead of a manual stop + start.
 func Start(p *paths.Paths) error {
+	return StartGuarded(p, nil)
+}
+
+// StartGuarded is Start, except that when a running daemon must be restarted
+// to pick up a changed service definition, beforeRestart runs first; an error
+// from it aborts the start before the definition is rewritten or the daemon
+// is stopped.
+func StartGuarded(p *paths.Paths, beforeRestart func() error) error {
 	if err := p.EnsureDirs(); err != nil {
 		return err
 	}
 	if alive, _ := daemonHealthCheck(p); alive {
-		reloaded, err := reinstallManagedServiceIfChanged(p)
+		reloaded, err := reinstallManagedServiceIfChanged(p, beforeRestart)
 		if err != nil {
 			return err
 		}
@@ -141,7 +150,7 @@ func Start(p *paths.Paths) error {
 // a binary upgrade re-applies the new service definition without forcing
 // users to run `daemon restart` explicitly. No-op on Windows and when the
 // service manager is bypassed (i.e., under `go test`).
-func reinstallManagedServiceIfChanged(p *paths.Paths) (bool, error) {
+func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() error) (bool, error) {
 	if serviceManagerBypassed() {
 		return false, nil
 	}
@@ -203,6 +212,11 @@ func reinstallManagedServiceIfChanged(p *paths.Paths) (bool, error) {
 		return false, nil
 	case readErr != nil && !os.IsNotExist(readErr):
 		return false, fmt.Errorf("read managed service definition: %w", readErr)
+	}
+	if beforeRestart != nil {
+		if err := beforeRestart(); err != nil {
+			return false, err
+		}
 	}
 	restoreMode := os.FileMode(0o644)
 	if info, err := os.Stat(installPath); err == nil {
@@ -543,6 +557,9 @@ func daemonIsRunningViaIPC(p *paths.Paths) (bool, error) {
 		if statErr != nil {
 			return false, fmt.Errorf("check daemon socket: %w", statErr)
 		}
+		if cleared, clearErr := clearDeadDaemonArtifacts(p); clearErr == nil && cleared {
+			return false, nil
+		}
 		return false, fmt.Errorf("connect to daemon socket: %w", err)
 	}
 	defer client.Close()
@@ -864,6 +881,60 @@ func waitForDaemonStop(p *paths.Paths, instance daemonInstance) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("daemon pid %d still running after kill", pid)
+}
+
+// clearDeadDaemonArtifacts removes the socket and PID file of a daemon that
+// is provably gone: the PID file names a process that no longer exists or
+// whose start time no longer matches, and no process holds the NM_HOME
+// singleton lock. A live or unverifiable PID leaves everything in place. The
+// lock is held only to re-check the PID file and remove the artifacts, so a
+// daemon that is starting up is neither blocked by the inspection nor loses
+// the socket it just bound.
+func clearDeadDaemonArtifacts(p *paths.Paths) (bool, error) {
+	data, err := os.ReadFile(p.PIDFile())
+	if err != nil {
+		return false, fmt.Errorf("read pid file: %w", err)
+	}
+	record, err := readDaemonPIDFileData(data)
+	if err != nil {
+		return false, fmt.Errorf("read pid file: %w", err)
+	}
+	running, err := daemonProcessRunning(record.PID)
+	if err != nil {
+		return false, fmt.Errorf("inspect daemon pid %d: %w", record.PID, err)
+	}
+	if running {
+		if record.StartedAt.IsZero() {
+			return false, nil
+		}
+		startedAt, err := daemonProcessStartTime(record.PID)
+		if err != nil {
+			return false, fmt.Errorf("inspect daemon pid %d: %w", record.PID, err)
+		}
+		diff := startedAt.Sub(record.StartedAt.UTC())
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff <= orphanStartTimeTolerance {
+			return false, nil
+		}
+	}
+
+	f, err := os.OpenFile(p.LockFile(), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return false, fmt.Errorf("open daemon lock: %w", err)
+	}
+	defer f.Close()
+	if err := tryLockFile(f); err != nil {
+		return false, nil
+	}
+	defer func() { _ = unlockFile(f) }()
+	current, err := os.ReadFile(p.PIDFile())
+	if err != nil || !bytes.Equal(current, data) {
+		return false, nil
+	}
+	cleanupDaemonArtifacts(p)
+	return true, nil
 }
 
 func cleanupDaemonArtifacts(p *paths.Paths) {

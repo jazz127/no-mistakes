@@ -132,7 +132,7 @@ func Dial(socketPath string) (*Client, error) {
 		return nil, err
 	}
 	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, MaxFrameBytes), MaxFrameBytes)
 	return &Client{
 		conn:    conn,
 		encoder: json.NewEncoder(conn),
@@ -261,7 +261,7 @@ func SubscribeContext(ctx context.Context, socketPath string, params *SubscribeP
 	}
 	encoder := json.NewEncoder(conn)
 	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, MaxFrameBytes), MaxFrameBytes)
 
 	// Send subscribe request.
 	req, err := NewRequest(MethodSubscribe, params)

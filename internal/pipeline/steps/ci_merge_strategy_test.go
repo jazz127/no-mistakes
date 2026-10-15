@@ -171,3 +171,49 @@ func TestCIStep_DefaultStrategyConflictRepairStillRebases(t *testing.T) {
 		t.Fatalf("the pipeline integrated the base itself under the default strategy: head %s", f.localHead(t))
 	}
 }
+
+// A clean BEHIND repair must honor the same integration strategy as a conflict.
+func TestCIStep_MergeStrategyBehindRepairMergesTheBaseAndFastForwards(t *testing.T) {
+	t.Parallel()
+	f := newCIRepairFixture(t, false, nil)
+	f.sctx.Config.Rebase.Strategy = config.RebaseStrategyMerge
+	f.sctx.Repo.DefaultBranch = "main"
+	gitCmd(t, f.dir, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(f.dir, "base-advance.txt"), []byte("base advance\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, f.dir, "add", "-A")
+	gitCmd(t, f.dir, "commit", "-m", "advance base without conflicts")
+	advancedBase := gitCmd(t, f.dir, "rev-parse", "HEAD")
+	gitCmd(t, f.dir, "push", "origin", "main")
+	gitCmd(t, f.dir, "checkout", "feature")
+	pushedHead := f.remoteHead(t)
+	f.sctx.Agent = &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		t.Fatalf("clean base merge must not ask a fixer to rebase: %s", opts.Prompt)
+		return nil, nil
+	}}
+	host, skip := buildHost(f.sctx, scm.ProviderGitHub)
+	if host == nil {
+		t.Fatalf("buildHost: %s", skip)
+	}
+	targets, err := parseCIFixTargets(`{"findings":[{"id":"ci-behind-base","category":"ci-behind-base","description":"branch behind base"}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := &scm.PR{Number: "42", URL: "https://github.com/test/repo/pull/42", BaseBranch: "main"}
+	repair, err := (&CIStep{}).autoFixCI(f.sctx, host, pr, targets)
+	if err != nil {
+		t.Fatalf("behind repair: %v\n%s", err, f.log())
+	}
+	if !repair.HeadAdvanced || repair.Revalidate {
+		t.Fatalf("repair = %+v, want fast-forward publication\n%s", repair, f.log())
+	}
+	parents := strings.Fields(gitCmd(t, f.dir, "rev-list", "--parents", "-n", "1", "HEAD"))
+	if len(parents) != 3 || parents[1] != pushedHead || parents[2] != advancedBase {
+		t.Fatalf("merge parents = %v, want %s then %s", parents, pushedHead, advancedBase)
+	}
+	if got := f.remoteHead(t); got != f.localHead(t) {
+		t.Fatalf("remote head = %s, want %s", got, f.localHead(t))
+	}
+	gitCmd(t, f.upstream, "merge-base", "--is-ancestor", pushedHead, f.remoteHead(t))
+}
