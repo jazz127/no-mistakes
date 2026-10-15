@@ -561,7 +561,7 @@ This uses the existing pipeline finding shape. Each finding needs a non-empty `i
 
 A report is limited to 1 MiB and 500 findings. The final encoded findings payload, including the command and log summary, must fit the portion of half the existing 1 MiB IPC frame left after the run's persisted findings and the refusal space reserved for every configured gate. The other half remains available for the envelope and other run state. JSON escaping can make the effective file cap lower than 1 MiB. A payload that cannot fit parks with one `error` finding naming its encoded size and the remaining transport budget, action `ask-user`; findings are never truncated to make a report fit. This fixed-size transport refusal omits the command summary, whose complete output remains in the gate's step log. Malformed JSON, a missing `findings` array, missing required fields, duplicate or unusable IDs, invalid severities or actions, unknown fields, and an unreadable or non-regular file also fail closed. An empty array is a valid report; an empty file opts out. The temporary directory is removed after the command is checked.
 
-Findings remain available in `axi status`, `axi logs`, and the TUI, and their IDs can be selected with `axi respond --action fix --findings <ids>`. Executor approval policy is unchanged: a zero-exit report containing only warnings or info still goes through the same approval rules as other steps. Warnings park, and an omitted action defaults to `ask-user`. A gate never starts an automatic repair, even when a reported finding says `auto-fix`.
+Findings remain available in `axi status`, `axi logs`, and the TUI, and their IDs can be selected with `axi respond --action fix --findings <ids>`. Executor approval policy is unchanged: a zero-exit report containing only warnings or info still goes through the same approval rules as other steps. Warnings park unless eligible for an automatic repair under a positive trusted [`auto_fix.gates.<name>`](#auto_fix) budget. An omitted action defaults to `ask-user`, which always parks the gate.
 
 #### Placement
 
@@ -575,7 +575,7 @@ A run resolves this list once when it starts. Adding or removing a gate on the d
 
 #### Failure
 
-A failing gate parks by default. Trusted [`auto_fix.gates.<name>`](#auto_fix) can authorize bounded repairs of auto-fix-eligible findings. Any `ask-user` finding still parks the whole gate. The current exit-code-only failure is `ask-user`, so the budget has no effect until the [structured findings follow-up](https://github.com/kunchenguid/no-mistakes/issues/1027) supplies auto-fix-eligible findings.
+A failing gate parks by default. A positive trusted [`auto_fix.gates.<name>`](#auto_fix) budget authorizes bounded automatic repairs when a structured report contains at least one `auto-fix` finding and no `ask-user` findings. Any `ask-user` finding still parks the whole gate. An exit-code-only failure is `ask-user`, so the budget does not authorize its automatic repair.
 
 Answering that decision with `fix` is that authorization: the gate then runs a fix turn against the reported findings and the command that must exit `0` without reporting error findings, then re-runs its check. The next verdict describes the repaired worktree. Answering `approve` accepts the change as it stands.
 
