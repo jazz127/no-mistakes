@@ -166,12 +166,8 @@ func (s *CustomGateStep) executeCommand(sctx *pipeline.StepContext, fixSummary s
 	}
 	return &pipeline.StepOutcome{
 		NeedsApproval: needsApproval,
-		// A gate must never repair on the pipeline's own initiative: it states a
-		// repository rule, so deciding that the change should be altered to
-		// satisfy it is the author's call, not the pipeline's. Answering the park
-		// with `fix` IS that authorization, and runFixTurn services it - being
-		// non-auto-fixable is about who decides, not about whether a repair is
-		// possible.
+		// Gate automation is decided by the executor's gateAutoFixEligible
+		// policy and trusted budget, not this generic step flag.
 		AutoFixable: false,
 		Findings:    findingsJSON,
 		ExitCode:    exitCode,

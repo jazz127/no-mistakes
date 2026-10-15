@@ -61,8 +61,11 @@ func TestTestNativeEarlyResultChildCompletion(t *testing.T) {
 			sctx.Ctx = ctx
 			sctx.Config.TestAgentTimeout = 5 * time.Second
 			if mode == "deadline" {
-				sctx.Config.TestAgentTimeout = 300 * time.Millisecond
-				sctx.Config.TestAgentWorkingTimeout = 300 * time.Millisecond
+				// Allow the native helper to start even under concurrent git-heavy
+				// tests; this case must expire while its child is running, not
+				// before the helper can record readiness.
+				sctx.Config.TestAgentTimeout = 2 * time.Second
+				sctx.Config.TestAgentWorkingTimeout = 2 * time.Second
 			}
 			// Logging goes through the result channel, so no test method races a late worker.
 			sctx.Log = func(string) {}

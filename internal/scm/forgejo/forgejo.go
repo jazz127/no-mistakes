@@ -1160,8 +1160,8 @@ func ResolveRemoteWithSSHDomain(remote, configuredBase, resolvedSSHHost, declare
 // checkSSHHost accepts an SSH remote's resolved host when it belongs to the
 // configured Forgejo instance: either the host of its web base URL or the
 // separate clone host declared through FORGEJO_SSH_DOMAIN. An unusable declared
-// domain never widens the accepted hosts, and a rejection names the resolved
-// host, every accepted host, and a declared domain that had to be ignored.
+// domain never widens the accepted hosts. A rejection names the resolved and
+// accepted hosts, but never echoes an invalid setting that may hold a credential.
 func checkSSHHost(resolvedSSHHost, baseHostname, declaredSSHDomain string) error {
 	if strings.EqualFold(resolvedSSHHost, baseHostname) {
 		return nil
