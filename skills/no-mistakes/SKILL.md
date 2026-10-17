@@ -213,7 +213,15 @@ Run the pipeline and decide on its findings as they come up:
 
    # skip this step
    no-mistakes axi respond --action skip
+
+   # continue static review when coverage is incomplete and findings are empty
+   no-mistakes axi respond --step review --action complete-coverage
    ```
+   `complete-coverage` runs a fresh reviewer over only the missing paths.
+   It reuses stored coverage only for the same run, step, round, head, base, and trusted scope.
+   Missing or invalid provenance keeps Review gated. Source changes during the turn also keep it gated.
+   It never approves incomplete coverage, runs a code fixer, or answers a question.
+   It refuses outstanding findings, finding overrides, and `--yes`.
    With `--action fix`, declines are explicit: every finding the gate shows
    must be listed in `--findings` or `--ignore`, and a response that
    leaves one out is refused with the missing ids named while the gate stays
@@ -290,6 +298,21 @@ It never substitutes the caller head or moves either branch to make them match.
 On refusal, inspect `no-mistakes axi status` and follow the custody guidance
 below. Dirty callers and callers without clean-head evidence retain existing
 selection behavior.
+
+When a `failed` outcome came from the agent invocation itself - a provider
+processing error, a usage or quota limit, a transport failure, or the agent
+process exiting - in Test or an earlier step, and the run never pushed,
+`no-mistakes axi retry --run <id>` continues that run instead of repeating it:
+a new run starts at the preserved head, carries the steps before the failed
+one, and restarts the failed step from the beginning, so a failed Review
+reviews the resulting head in full before Test. First adopt the preserved head
+with the reported `no-mistakes axi sync --recover` so your clean `HEAD` is
+exactly that head. Retry refuses, changing nothing, and names the failed proof
+whenever continuing is not provably safe - a failure about the change itself,
+a moved or dirty branch, another run, or changed configuration (repository
+settings, the agent, or its model since the carried Review ran); then use
+`rerun` or address the failure. Like `respond`, it blocks until the next
+`gate:` or outcome.
 
 Before any post-pipeline local commit or fresh run, read the structured `branch_sync` object returned by AXI home, status, or a drive result.
 Only when its `next_action.code` is `sync`, run `no-mistakes axi sync` first.

@@ -159,6 +159,7 @@ The CI monitor stays live in the background after checks pass, and when it sees 
 On GitHub, a clean PR whose base requires branches to be up to date (`mergeStateStatus: BEHIND`) still reports `checks-passed` and waits for a human to bring it up to date; only when the repository opts into [`ci.rebase_behind`](/no-mistakes/reference/repo-config/#cirebase_behind) does the monitor give it the same rebase, once its checks are green and the base has held still for one poll.
 A PR that is merely behind a base without that rule needs nothing, since the platform merges it.
 The one exception is when that monitor is no longer running - the PR was closed, the run was aborted or superseded, it idle-timed-out, or its auto-fix attempts were exhausted - in which case see [`no-mistakes rerun`](/no-mistakes/reference/cli/#no-mistakes-rerun) for the restart conditions.
+A run that failed before Push only because an agent invocation failed - a provider error, a usage limit, or the agent process exiting - can instead continue from its failed step with [`no-mistakes axi retry --run <id>`](/no-mistakes/reference/cli/#no-mistakes-axi-retry); it refuses with the failed proof whenever continuing is not provably safe.
 The agent must not use `no-mistakes axi run` to refresh a still-active PR: after `checks-passed` it reattaches to the running monitor with HEAD unchanged and returns the monitor output without rebasing.
 
 In task-first mode, if the repo is on the default branch, the skill tells the agent to create a feature branch before committing because the gate validates committed history on a non-default branch.
@@ -178,6 +179,7 @@ no-mistakes axi respond --run <id> --action approve
 no-mistakes axi logs --step review --full
 no-mistakes axi abort
 no-mistakes axi abort --run <id>
+no-mistakes axi retry --run <id>
 ```
 
 Before any post-pipeline local commit or fresh run, read `branch_sync` and follow its exact `next_action.command`.
@@ -295,7 +297,23 @@ Starts a persistent HTTP server (`acli rovodev serve`) on first use and reuses i
 
 ## OpenCode
 
-Starts a persistent HTTP server (`opencode serve`) on first use and reuses it across invocations. If a reused server refuses a connection, no-mistakes discards it and retries with a fresh server. Any `agent_args_override.opencode` flags are inserted before no-mistakes' managed serve flags; `opencode serve` exits with usage on an unknown flag, so a model flag does not belong there. Model and reasoning effort come from [`agent_config.opencode`](/no-mistakes/reference/global-config/#agent_config) and travel in the session message as `model` (from the `provider/model` form) and `variant`. Similar session lifecycle to Rovo Dev: create session, send message, stream SSE events until idle, delete session. Supports structured output by sending the `json_schema` descriptor at `info.format`, as required by OpenCode 1.17 and later. See the OpenCode adapter implementation (`internal/agent/opencode*.go`) for the authoritative tool-choice retry conditions, transient failure boundaries, and prompt-only fallback semantics. When native structured output is genuinely absent, it falls back to the common text fallback described above while allowing `null` for optional fields.
+Starts a persistent HTTP server (`opencode serve`) on first use and reuses it across invocations.
+The binary's major version selects the protocol before any session or prompt is created; OpenCode 1 and 2 are supported.
+Any `agent_args_override.opencode` flags are inserted before no-mistakes' managed serve flags; model flags do not belong there because `opencode serve` rejects them.
+Model and reasoning effort come from [`agent_config.opencode`](/no-mistakes/reference/global-config/#agent_config).
+
+OpenCode 2 runs with a private per-server credential and a parent-owned stdin lease (`serve --stdio`).
+The credential is used for health checks and API requests, never put in command arguments, and removed from the environment before OpenCode tools inherit it.
+Health is verified through `/api/info`, not the retired `/global/health` endpoint.
+Each invocation creates a fresh session at its own worktree location, selects the model and variant when creating that session, admits its prompt, waits for execution, and reads every page of projected messages.
+Live SSE events provide progress, but a disconnected or lagging stream never proves completion or absence of tool effects.
+The final message projection supplies the authoritative answer and per-step token usage.
+Because the V2 tool-using session API has no native JSON-schema format field, the schema is included in the prompt and the final text is validated with the common text fallback described above, including nullable optional fields.
+A provider failure never becomes a successful answer merely because it left valid-looking JSON behind.
+An admitted V2 execution is not automatically replayed after an uncertain or failed outcome; cancellation interrupts and deletes only the invocation's own session.
+
+OpenCode 1 retains its synchronous message API, `model`/`variant` message fields, native `info.format` JSON-schema output and existing tool-evidence-gated retry/fallback behavior.
+See `internal/agent/opencode*.go` for the authoritative version-specific contracts.
 
 ## Pi
 
@@ -309,7 +327,7 @@ This strict path needs Pi 0.82.0 or later (read from `pi --version`; a prereleas
 Pi applies `--no-tools` (`-nt`) and a `--tools` (`-t`) allowlist to extension tools too, so with either flag in `agent_args_override.pi` the model cannot see `no_mistakes_output`.
 Otherwise the invocation uses the prompt-inlined schema: the schema goes into the prompt and the final text response is validated with the common text fallback described above. A provider/model that refuses strict tools is retried once on that path and then stays on it for the agent's lifetime.
 The step log names which path each structured invocation ran.
-On the strict path, a run that ends without calling `no_mistakes_output` as its only final tool call is a structured-output rejection, so Review's bounded schema rerun applies.
+On the strict path, a run that ends without calling `no_mistakes_output` as its only final tool call is retried by the bounded invocation retry loop; if retries exhaust, it remains a structured-output rejection, so Review's bounded schema rerun applies. A `pi exited: ...: fetch failed` error is retried only when its stderr does not indicate authentication, access denial, or quota exhaustion; those failures remain terminal.
 Either way the adapter validates the result against the same schema, keeping required fields and the existing nullable-optional-field contract unchanged.
 The extension is invocation-scoped and works with `--no-extensions`.
 Invocations without a schema retain the ordinary final-text path.
