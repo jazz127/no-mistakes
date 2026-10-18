@@ -8,8 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -83,7 +81,7 @@ func (a *opencodeAgent) runV2(ctx context.Context, opts RunOpts, baseURL string)
 	if response.StatusCode != http.StatusOK || !strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
 		return nil, fmt.Errorf("opencode event stream: expected SSE response, got HTTP %d", response.StatusCode)
 	}
-	state := opencodeV2Stream{sessionID: created.Data.ID, parts: make(map[string]string), emitted: make(map[string]string), flushed: make(map[string]bool), usage: make(map[string]TokenUsage)}
+	state := opencodeV2Stream{sessionID: created.Data.ID, ended: make(map[string]string), flushed: make(map[string]bool), usage: make(map[string]TokenUsage)}
 	streamDone := make(chan struct{})
 	go func() {
 		defer close(streamDone)
@@ -131,7 +129,7 @@ func (a *opencodeAgent) runV2(ctx context.Context, opts RunOpts, baseURL string)
 	evidence := opencodeToolsNone
 	text := ""
 	finalMessageID := ""
-	var finalParts []string // complete text of each text part of the final message, in order
+	var finalParts []string
 	var failure *opencodeV2Error
 	for _, message := range messages {
 		if message.Tokens != nil {
@@ -175,53 +173,15 @@ func (a *opencodeAgent) runV2(ctx context.Context, opts RunOpts, baseURL string)
 	if len(messages) == 0 {
 		return resultFromUsage(total), opencodeTurnFailure(opencodeToolsUnknown, fmt.Errorf("opencode projection: no messages after execution"))
 	}
-	// Completion and live events have independent delivery timing. The wait
-	// response may win even when final text is still buffered on the stream.
-	// Flush any buffered parts of the final message that never reached a
-	// definitive end, in their original (ordinal) order and using the complete
-	// fetched text for each part, so displayed progress is neither garbled nor
-	// stale. Then reconcile the final projection without emitting a prefix
-	// twice.
-	var unfinished []string
-	for key := range state.parts {
-		if !strings.HasPrefix(key, finalMessageID+":") || state.flushed[key] {
-			continue
+	for ordinal, partText := range finalParts {
+		key := fmt.Sprintf("%s:%d", finalMessageID, ordinal)
+		if !state.flushed[key] {
+			state.emit(finalMessageID, partText, opts)
+			state.flushed[key] = true
 		}
-		unfinished = append(unfinished, key)
-	}
-	slices.SortFunc(unfinished, func(a, b string) int {
-		return ordinalOf(a) - ordinalOf(b)
-	})
-	for _, key := range unfinished {
-		partText := state.parts[key]
-		if ordinal := ordinalOf(key); ordinal >= 0 && ordinal < len(finalParts) {
-			partText = finalParts[ordinal]
-		}
-		if partText == "" {
-			continue
-		}
-		state.emit(finalMessageID, partText, opts)
-		state.flushed[key] = true
-	}
-	if streamed := state.emitted[finalMessageID]; strings.HasPrefix(text, streamed) {
-		state.emit(finalMessageID, strings.TrimPrefix(text, streamed), opts)
 	}
 	result, err := finalizeTextResult("opencode", text, opts.JSONSchema, total)
 	return result, opencodeTurnFailure(evidence, err)
-}
-
-// ordinalOf returns the text-part ordinal embedded in a stream part key
-// ("messageID:ordinal"), or -1 when the key is malformed.
-func ordinalOf(key string) int {
-	i := strings.LastIndex(key, ":")
-	if i < 0 || i == len(key)-1 {
-		return -1
-	}
-	n, err := strconv.Atoi(key[i+1:])
-	if err != nil {
-		return -1
-	}
-	return n
 }
 
 // The private server credential is sent only to the selected loopback server,
@@ -341,8 +301,7 @@ func (c opencodeV2Client) messages(ctx context.Context, sessionURL string) ([]op
 
 type opencodeV2Stream struct {
 	sessionID     string
-	parts         map[string]string
-	emitted       map[string]string
+	ended         map[string]string
 	flushed       map[string]bool
 	lastMessageID string
 	usage         map[string]TokenUsage
@@ -359,7 +318,6 @@ func (s *opencodeV2Stream) emit(messageID, text string, opts RunOpts) {
 		opts.OnChunk(text)
 	}
 	s.lastMessageID = messageID
-	s.emitted[messageID] += text
 }
 
 func (s *opencodeV2Stream) read(reader io.Reader, opts RunOpts) {
@@ -382,10 +340,6 @@ func (s *opencodeV2Stream) read(reader io.Reader, opts RunOpts) {
 		key := fmt.Sprintf("%s:%d", data.MessageID, data.Ordinal)
 		switch value.Type {
 		case "session.text.delta":
-			// Buffer deltas per part instead of emitting them live: a partial
-			// that later turns out not to be a prefix of the complete text
-			// cannot be retracted from the append-only OnChunk interface.
-			s.parts[key] += data.Delta
 			// Report activity for accepted deltas even while their text stays
 			// buffered, so a still-generating response is not mistaken for an
 			// idle one and cancelled past the stall budget.
@@ -397,11 +351,19 @@ func (s *opencodeV2Stream) read(reader io.Reader, opts RunOpts) {
 				})
 			}
 		case "session.text.ended":
-			if !s.flushed[key] {
-				s.emit(data.MessageID, data.Text, opts)
-				s.flushed[key] = true
+			s.ended[key] = data.Text
+			for ordinal := 0; ; ordinal++ {
+				partKey := fmt.Sprintf("%s:%d", data.MessageID, ordinal)
+				if s.flushed[partKey] {
+					continue
+				}
+				text, ok := s.ended[partKey]
+				if !ok {
+					break
+				}
+				s.emit(data.MessageID, text, opts)
+				s.flushed[partKey] = true
 			}
-			s.parts[key] = data.Text
 		case "session.step.ended", "session.step.failed":
 			if data.Tokens != nil && data.MessageID != "" {
 				s.usage[data.MessageID] = opencodeTokensToUsage(data.Tokens)

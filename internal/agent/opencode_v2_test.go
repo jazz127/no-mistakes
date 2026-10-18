@@ -363,3 +363,44 @@ func TestOpencodeV2_RedirectCannotReceiveThePrivateServerCredential(t *testing.T
 		t.Fatalf("unsafe redirect or error disclosure: forwarded=%v err=%v", forwarded.Load(), err)
 	}
 }
+
+func TestOpencodeV2_ReconcilesMissingAndReorderedTextParts(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		events string
+	}{
+		{name: "no events"},
+		{name: "later delta", events: `data: {"type":"session.text.delta","data":{"sessionID":"ses_fixture","assistantMessageID":"msg_final","ordinal":1,"delta":"world"}}` + "\n\n"},
+		{name: "later end", events: `data: {"type":"session.text.ended","data":{"sessionID":"ses_fixture","assistantMessageID":"msg_final","ordinal":1,"text":"world"}}` + "\n\n"},
+		{name: "earlier end", events: `data: {"type":"session.text.ended","data":{"sessionID":"ses_fixture","assistantMessageID":"msg_final","ordinal":0,"text":"hello "}}` + "\n\n"},
+		{name: "reordered and duplicated ends", events: `data: {"type":"session.text.ended","data":{"sessionID":"ses_fixture","assistantMessageID":"msg_final","ordinal":1,"text":"world"}}` + "\n\n" +
+			`data: {"type":"session.text.ended","data":{"sessionID":"ses_fixture","assistantMessageID":"msg_final","ordinal":0,"text":"hello "}}` + "\n\n" +
+			`data: {"type":"session.text.ended","data":{"sessionID":"ses_fixture","assistantMessageID":"msg_final","ordinal":1,"text":"world"}}` + "\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &opencodeV2Fixture{pages: []string{`{"data":[{"id":"msg_final","type":"assistant","content":[{"type":"text","text":"hello "},{"type":"text","text":"world"}]}],"cursor":{}}`}, events: tc.events}
+			var chunks strings.Builder
+			result, err := v2Agent(f.server(t)).Run(context.Background(), RunOpts{CWD: t.TempDir(), Prompt: "work", OnChunk: func(text string) { chunks.WriteString(text) }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Text != "hello world" || chunks.String() != "hello world" {
+				t.Fatalf("answer/progress = %q / %q, want hello world", result.Text, chunks.String())
+			}
+		})
+	}
+}
+
+func TestOpencodeV2Stream_DefersLaterTextUntilEarlierPartsEnd(t *testing.T) {
+	s := opencodeV2Stream{sessionID: "session", ended: map[string]string{}, flushed: map[string]bool{}, usage: map[string]TokenUsage{}}
+	var chunks strings.Builder
+	opts := RunOpts{OnChunk: func(text string) { chunks.WriteString(text) }}
+	s.read(strings.NewReader(`data: {"type":"session.text.ended","data":{"sessionID":"session","assistantMessageID":"message","ordinal":1,"text":"world"}}`+"\n\n"), opts)
+	if chunks.Len() != 0 {
+		t.Fatalf("later part emitted before its prefix: %q", chunks.String())
+	}
+	s.read(strings.NewReader(`data: {"type":"session.text.ended","data":{"sessionID":"session","assistantMessageID":"message","ordinal":0,"text":"hello "}}`+"\n\n"), opts)
+	if chunks.String() != "hello world" {
+		t.Fatalf("completed parts = %q, want hello world", chunks.String())
+	}
+}

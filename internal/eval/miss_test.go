@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -276,5 +277,174 @@ func TestCaptureOfACarriedReviewKeepsTheOriginalReviewCost(t *testing.T) {
 	}
 	if len(cases) != 1 || cases[0].Baseline.DurationMS != 777 {
 		t.Fatalf("captured = %#v, want one case with the original review's 777ms", cases)
+	}
+}
+
+func TestCarriedReviewKeepsOneCaseAcrossRetries(t *testing.T) {
+	for _, originalFirst := range []bool{true, false} {
+		t.Run(fmt.Sprint(originalFirst), func(t *testing.T) {
+			ctx := context.Background()
+			p, database, run, repo, round := setupCapturedRun(t, ctx)
+			defer database.Close()
+			steps, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateStepStatus(steps[0].ID, types.StepStatusCompleted); err != nil {
+				t.Fatal(err)
+			}
+			store, err := Open(p.EvalDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if originalFirst {
+				if _, err := Capture(ctx, store, p, database, run.ID); err != nil {
+					t.Fatal(err)
+				}
+				if pins, err := store.ListCases("diversified"); err != nil || len(pins) != 1 {
+					t.Fatalf("pins = %+v, err %v; want one held-out review", pins, err)
+				}
+			}
+			previous := run
+			for range 2 {
+				continuation, err := database.InsertRun(repo.ID, run.Branch, run.HeadSHA, run.BaseSHA)
+				if err != nil {
+					t.Fatal(err)
+				}
+				previousSteps, err := database.GetStepsByRun(previous.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				completed, err := database.GetStepResult(previousSteps[0].ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := database.InsertCarriedStepResult(continuation.ID, completed); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.InsertRunRetry(db.RunRetry{RunID: continuation.ID, SourceRunID: previous.ID, StepName: types.StepTest, CheckpointHeadSHA: run.HeadSHA}); err != nil {
+					t.Fatal(err)
+				}
+				cases, err := Capture(ctx, store, p, database, continuation.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(cases) != 1 || cases[0].ID != run.ID+"-"+round.ID || cases[0].SourceRunID != run.ID {
+					t.Fatalf("capture = %+v, want the original round's identity", cases)
+				}
+				previous = continuation
+			}
+			if _, err := Capture(ctx, store, p, database, run.ID); err != nil {
+				t.Fatal(err)
+			}
+			if all, err := store.ListCases("all"); err != nil || len(all) != 1 {
+				t.Fatalf("all = %+v, err %v; want one executed review", all, err)
+			}
+			if tune, err := store.ListCases("tune"); err != nil || len(tune) != 0 {
+				t.Fatalf("tune = %+v, err %v; held-out review leaked into tune", tune, err)
+			}
+			if err := database.UpdateRunPRState(previous.ID, "merged"); err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range []string{previous.ID, run.ID} {
+				cases, err := RelabelRun(ctx, store, p, database, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(cases) != 1 || len(cases[0].Labels.Findings) != 1 || cases[0].Labels.Findings[0].Kind != GoldTruePositive {
+					t.Fatalf("relabel %s = %+v, want user-fix gold on the original case", id, cases)
+				}
+			}
+		})
+	}
+}
+
+func TestCarriedGreenReviewMissUpdatesTheOriginalCase(t *testing.T) {
+	ctx := context.Background()
+	p, database, run, repo, round := setupCapturedRunWithFindings(t, ctx, `{"findings":[]}`)
+	defer database.Close()
+	step, err := database.GetStepResult(round.StepResultID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatus(step.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+	step, err = database.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuation, err := database.InsertRun(repo.ID, run.Branch, run.HeadSHA, run.BaseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertCarriedStepResult(continuation.ID, step); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(p.EvalDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := Capture(ctx, store, p, database, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	miss := FindingGold{ID: "missed-bug", Description: "valid input returns the wrong result", Kind: GoldFalseNegative}
+	result, err := IngestPostPRMiss(ctx, store, p, database, continuation.ID, []FindingGold{miss})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CaseID != run.ID+"-"+round.ID || result.Added != 1 {
+		t.Fatalf("ingest = %+v, want one miss on the original case", result)
+	}
+	if cases, err := store.ListCases("all"); err != nil || len(cases) != 1 || len(cases[0].Labels.Findings) != 1 || cases[0].Labels.Findings[0].ID != miss.ID {
+		t.Fatalf("cases = %+v, err %v; want one original case containing the miss", cases, err)
+	}
+}
+
+func TestCarriedReviewMergeGoldSurvivesSourceRelabel(t *testing.T) {
+	ctx := context.Background()
+	p, database, run, repo, round := setupCapturedRun(t, ctx)
+	defer database.Close()
+	if err := database.SetStepRoundSelection(round.ID, strPtr(`["real-bug"]`), db.RoundSelectionSourceAutoFix); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatus(round.StepResultID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+	step, err := database.GetStepResult(round.StepResultID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuation, err := database.InsertRun(repo.ID, run.Branch, run.HeadSHA, run.BaseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertCarriedStepResult(continuation.ID, step); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.InsertRunRetry(db.RunRetry{RunID: continuation.ID, SourceRunID: run.ID, StepName: types.StepTest, CheckpointHeadSHA: run.HeadSHA}); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(p.EvalDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := Capture(ctx, store, p, database, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunPRState(continuation.ID, "merged"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{continuation.ID, run.ID} {
+		cases, err := RelabelRun(ctx, store, p, database, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cases) != 1 || len(cases[0].Labels.Findings) != 1 || cases[0].Labels.Findings[0].Source != goldSourceAutoFixMerged {
+			t.Fatalf("relabel %s = %+v, want merged auto-fix gold", id, cases)
+		}
 	}
 }

@@ -1518,6 +1518,13 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
 	}
+	bgOwnsWorktree := false
+	var retryConfig *config.Config
+	defer func() {
+		if retry != nil && !bgOwnsWorktree {
+			m.discardRefusedRetryRun(run.ID, retryConfig)
+		}
+	}()
 	if inherited := strings.TrimSpace(inheritedPRURL); inherited != "" {
 		if err := m.db.UpdateRunPRURL(run.ID, inherited); err != nil {
 			m.db.UpdateRunError(run.ID, fmt.Sprintf("inherit PR URL: %s", err))
@@ -1578,7 +1585,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// background goroutine takes ownership only once it is running. Arming it any
 	// later would leave the directory behind - in the operator's own worktree
 	// root, unswept - for whichever failures happen in between.
-	bgOwnsWorktree := false
 	defer func() {
 		if !bgOwnsWorktree {
 			m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_setup_failed")
@@ -1657,6 +1663,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		slog.Info("repo commands/agent loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
 	}
 	cfg := config.MergeForRemote(globalCfg, effectiveRepoCfg, repo.UpstreamURL)
+	retryConfig = cfg
 	if err := cfg.Review.ValidatePathInstructionsBudget(); err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("review_path_instructions_budget")
@@ -1664,12 +1671,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	}
 	if retry != nil {
 		if err := retry.proveAtLaunch(ctx, m, globalCfg, cfg, effectiveRepoCfg, run.ID); err != nil {
-			m.discardRefusedRetryRun(run.ID, cfg)
 			trackStartFailure("retry_proof")
 			return "", err
 		}
 		if err := retry.record(m.db, run); err != nil {
-			m.discardRefusedRetryRun(run.ID, cfg)
 			trackStartFailure("record_retry")
 			return "", err
 		}

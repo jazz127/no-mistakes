@@ -851,3 +851,58 @@ func (f *retryFixture) requireNothingLaunched(t *testing.T) {
 		t.Errorf("refusal executed %d steps", got)
 	}
 }
+
+func TestRetrySetupFailuresLeaveTheSourceRetryable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the agent stand-ins are POSIX shell scripts")
+	}
+	for _, stage := range []string{"global config", "trusted fetch", "agent creation"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newRetryFixture(t, retryFixtureOptions{beforeSource: func(t *testing.T, f *retryFixture) {
+				writeFakeAgents(t, f.p, "claude", "", "claude")
+			}})
+			globalBytes, err := os.ReadFile(f.p.ConfigFile())
+			if err != nil {
+				t.Fatal(err)
+			}
+			global, err := config.LoadGlobal(f.p.ConfigFile())
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := f.manager(t, &countingStep{name: types.StepTest, count: f.executions})
+			m.afterRetryProof = func() {
+				switch stage {
+				case "global config":
+					if err := os.WriteFile(f.p.ConfigFile(), []byte("agent: ["), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				case "trusted fetch":
+					gitCmd(t, f.p.RepoDir(f.repo.ID), "update-ref", "-d", "refs/heads/main")
+				case "agent creation":
+					if err := os.Chmod(global.AgentPathOverride["claude"], 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if _, err := m.HandleRetry(context.Background(), f.repo.ID, "main", f.source.ID, f.callerHead); err == nil {
+				t.Fatal("retry started despite a setup failure")
+			}
+			f.requireNothingLaunched(t)
+			m.afterRetryProof = nil
+			if err := os.WriteFile(f.p.ConfigFile(), globalBytes, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, f.p.RepoDir(f.repo.ID), "update-ref", "refs/heads/main", f.submitted)
+			if err := os.Chmod(global.AgentPathOverride["claude"], 0o755); err != nil {
+				t.Fatal(err)
+			}
+			link, err := m.HandleRetry(context.Background(), f.repo.ID, "main", f.source.ID, f.callerHead)
+			if err != nil {
+				t.Fatalf("retry after repairing setup: %v", err)
+			}
+			if run := waitForRunTerminalState(t, f.d, link.RunID); run.Status != types.RunCompleted {
+				t.Fatalf("continuation = %s, want completed", run.Status)
+			}
+		})
+	}
+}
