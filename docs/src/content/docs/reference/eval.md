@@ -16,6 +16,8 @@ When `eval sets`, `eval report`, or `eval run` resolves repository fingerprints 
 
 Cases arrive on their own. When an eligible run finishes, its decided Review passes are frozen into the local corpus - one case per pass. Collection happens after the pipeline has already reported its outcome, so it can never change or fail the run; a problem is logged and nothing else.
 
+When a [checkpoint retry](/no-mistakes/reference/cli/#no-mistakes-axi-retry) carries a completed Review, capture keeps the case ID and source run of the run that executed that review round. Capturing either run reuses the same case, so a held-out review cannot also enter `tune` through a continuation. Relabeling and post-PR miss ingestion likewise update that original case.
+
 Two settings in `config.yaml` govern review-case collection, both on by default and both documented in [Global configuration](/no-mistakes/reference/global-config/#eval):
 
 - `eval.capture_provenance` records the exact commit and configuration inputs a replay needs. It is written when the review round is written and **cannot be added afterwards**, so a run reviewed with it off is never capturable - not by the automatic path and not by hand.
@@ -60,7 +62,7 @@ The manifest never stores a remote URL. Capture is read-only against the existin
 
 The unit of truth is whether a review **finding** was a real issue, scored with scientific terms, not whether the run parked or passed.
 
-Capture writes gold from the **recorded gate decision** for a review round - what the human chose to fix or ship - combined with the source run's merge state. It never keys a label on whether a later review round still happens to raise the finding, because a fixed finding and a shipped-unfixed finding both disappear from later rounds. A merged PR is still not a case-level pass or fail:
+Capture writes gold from the **recorded gate decision** for a review round - what the human chose to fix or ship - combined with the run's merge state. For a Review carried through checkpoint retries, merge evidence comes from the latest continuation that still carries that same Review; the case's source identity stays unchanged. It never keys a label on whether a later review round still happens to raise the finding, because a fixed finding and a shipped-unfixed finding both disappear from later rounds. A merged PR is still not a case-level pass or fail:
 
 - A finding the human selected for Fix (`selected_finding_ids` with a user source) is **true-positive** gold: that finding is a true issue. Merge is not required.
 - A finding the human added (`user_findings_json`, source `user`) is **false-negative** gold: the original review missed a real issue.
