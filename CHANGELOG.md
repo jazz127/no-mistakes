@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.98.0](https://github.com/kunchenguid/no-mistakes/compare/v1.97.2...v1.98.0) (2026-10-17)
+
+
+### Features
+
+* **daemon:** add checkpoint retry for failed runs ([#1496](https://github.com/kunchenguid/no-mistakes/issues/1496)) ([59340fb](https://github.com/kunchenguid/no-mistakes/commit/59340fbae30bb34a05d8d2c68074f4f39563369a))
+* **pipeline:** continue incomplete Review coverage in the same run ([#1490](https://github.com/kunchenguid/no-mistakes/issues/1490)) ([fd8d6fa](https://github.com/kunchenguid/no-mistakes/commit/fd8d6fa8a1a423797405e18973298710ef648f59))
+* **pipeline:** record gate response origins ([#1514](https://github.com/kunchenguid/no-mistakes/issues/1514)) ([d39cd9e](https://github.com/kunchenguid/no-mistakes/commit/d39cd9e5e30d10effc511c86786dd9e30df35dbd))
+
+
+### Bug Fixes
+
+* **agent:** retry transient Pi invocation failures ([#1516](https://github.com/kunchenguid/no-mistakes/issues/1516)) ([b5f1c65](https://github.com/kunchenguid/no-mistakes/commit/b5f1c65f776ef2818b060b68d12a71bad6f85061))
+* **update:** restart the daemon through the newly installed binary ([#1493](https://github.com/kunchenguid/no-mistakes/issues/1493)) ([e3ce34e](https://github.com/kunchenguid/no-mistakes/commit/e3ce34e8c749e2fc2850b402a1069fcd55c90580)), closes [#1383](https://github.com/kunchenguid/no-mistakes/issues/1383)
+
+## [1.97.2](https://github.com/kunchenguid/no-mistakes/compare/v1.97.1...v1.97.2) (2026-10-15)
+
+
+### Bug Fixes
+
+* **pipeline:** restore every caret pair in legacy appendix digest fallback ([#1473](https://github.com/kunchenguid/no-mistakes/issues/1473)) ([1773fc4](https://github.com/kunchenguid/no-mistakes/commit/1773fc4b465bd154ed225c909eec271ab8fc73d2))
+* **scm:** update GitHub PR content over REST instead of gh pr edit ([#1477](https://github.com/kunchenguid/no-mistakes/issues/1477)) ([9c0a7e2](https://github.com/kunchenguid/no-mistakes/commit/9c0a7e2c85ff2f6c0a87c120207c5cc9d304e365))
+
+## [1.97.1](https://github.com/kunchenguid/no-mistakes/compare/v1.97.0...v1.97.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **agent:** keep Claude's structured submission through a prose-only result ([#1458](https://github.com/kunchenguid/no-mistakes/issues/1458)) ([5c43190](https://github.com/kunchenguid/no-mistakes/commit/5c43190fdc659fa1e56354207cd8e6dcc2a78e1f))
+* **agent:** skip a retry that cannot finish inside the step deadline ([#1464](https://github.com/kunchenguid/no-mistakes/issues/1464)) ([d89a268](https://github.com/kunchenguid/no-mistakes/commit/d89a268252717da3b05691f30d68d11aaaf6f8c1))
+* **cli:** allow daemon lifecycle commands with an older daemon ([#1462](https://github.com/kunchenguid/no-mistakes/issues/1462)) ([108c881](https://github.com/kunchenguid/no-mistakes/commit/108c88116f5d975782ec6caed756c8f6cb114bdd))
+
 ## [1.97.0](https://github.com/kunchenguid/no-mistakes/compare/v1.96.0...v1.97.0) (2026-10-14)
 
 

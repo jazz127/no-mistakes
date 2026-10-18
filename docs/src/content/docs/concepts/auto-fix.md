@@ -115,7 +115,7 @@ The step log names what was left out, and those files stay uncommitted in the ru
 
 ## Step rounds
 
-Each execution of a step (initial run or follow-up auto-fix run) is recorded as a "round" in the database.
+Each execution of a step is recorded as a "round" in the database.
 A round stores its findings, duration, any selected finding IDs and whether that selection came from the user or auto-fix filtering, the merged finding payload actually sent to the fix agent for that round, and any one-line fix summary from that execution.
 That merged payload can include per-finding user notes and user-authored findings added from the TUI or AXI interface.
 AXI status uses the same round history and the persisted auto-fix limit to show the active fix attempt, for example `auto-fix 1/3` or `fix 2`.
@@ -124,8 +124,12 @@ The generated PR can surface this recorded evidence; the [pipeline steps referen
 The full round history remains available in the run log.
 
 Round trigger types:
+
 - `initial` - first execution
 - `auto_fix` - triggered by the automatic fix loop
 - `auto_fix` - also used when you press `f` in the TUI or use `no-mistakes axi respond --action fix` to run a follow-up fix
+- `answer` - Review's finalize turn after its open questions are answered; see [Review conversation](/no-mistakes/concepts/review-conversation/)
+- `coverage` - a static review of missing paths under the [coverage continuation rules](/no-mistakes/reference/pipeline-steps/#coverage-continuation)
+- `retry` - the failed step's first execution in a [checkpoint continuation](/no-mistakes/reference/cli/#no-mistakes-axi-retry)
 
 Legacy `user_fix` rounds are still rendered as `auto-fix` in PR summaries for backward compatibility.
