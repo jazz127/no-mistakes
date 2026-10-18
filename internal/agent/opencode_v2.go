@@ -133,7 +133,7 @@ func (a *opencodeAgent) runV2(ctx context.Context, opts RunOpts, baseURL string)
 	var failure *opencodeV2Error
 	for _, message := range messages {
 		if message.Tokens != nil {
-			usage[message.ID] = opencodeTokensToUsage(message.Tokens)
+			usage[message.ID] = message.Tokens.usage()
 		}
 		if message.Type != "assistant" {
 			continue
@@ -250,6 +250,21 @@ type opencodeV2Error struct {
 	Status  int    `json:"status"`
 }
 
+type opencodeV2Tokens struct {
+	opencodeTokens
+	Reasoning *int `json:"reasoning"`
+}
+
+func (t *opencodeV2Tokens) usage() TokenUsage {
+	u := opencodeTokensToUsage(&t.opencodeTokens)
+	if t.Reasoning != nil {
+		u.ReasoningTokens = *t.Reasoning
+		u.ReasoningReported = true
+		u.OutputTokens += *t.Reasoning
+	}
+	return u
+}
+
 type opencodeV2Message struct {
 	ID      string `json:"id"`
 	Type    string `json:"type"`
@@ -257,8 +272,8 @@ type opencodeV2Message struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"content"`
-	Tokens *opencodeTokens  `json:"tokens"`
-	Error  *opencodeV2Error `json:"error"`
+	Tokens *opencodeV2Tokens `json:"tokens"`
+	Error  *opencodeV2Error  `json:"error"`
 }
 
 func (c opencodeV2Client) messages(ctx context.Context, sessionURL string) ([]opencodeV2Message, error) {
@@ -325,12 +340,12 @@ func (s *opencodeV2Stream) read(reader io.Reader, opts RunOpts) {
 		var value struct {
 			Type string `json:"type"`
 			Data struct {
-				SessionID string          `json:"sessionID"`
-				MessageID string          `json:"assistantMessageID"`
-				Ordinal   int             `json:"ordinal"`
-				Text      string          `json:"text"`
-				Delta     string          `json:"delta"`
-				Tokens    *opencodeTokens `json:"tokens"`
+				SessionID string            `json:"sessionID"`
+				MessageID string            `json:"assistantMessageID"`
+				Ordinal   int               `json:"ordinal"`
+				Text      string            `json:"text"`
+				Delta     string            `json:"delta"`
+				Tokens    *opencodeV2Tokens `json:"tokens"`
 			} `json:"data"`
 		}
 		if json.Unmarshal([]byte(event.Data), &value) != nil || value.Data.SessionID != s.sessionID {
@@ -366,7 +381,7 @@ func (s *opencodeV2Stream) read(reader io.Reader, opts RunOpts) {
 			}
 		case "session.step.ended", "session.step.failed":
 			if data.Tokens != nil && data.MessageID != "" {
-				s.usage[data.MessageID] = opencodeTokensToUsage(data.Tokens)
+				s.usage[data.MessageID] = data.Tokens.usage()
 			}
 		}
 		return true

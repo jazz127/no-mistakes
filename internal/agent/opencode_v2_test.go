@@ -206,7 +206,7 @@ func TestOpencodeV2_ProviderFailureCannotBecomeAnAnswerOrAReplayedTurn(t *testin
 
 func TestOpencodeV2_PaginationFindsEarlierToolEffectsBeforeRejectingFinalOutput(t *testing.T) {
 	f := &opencodeV2Fixture{pages: []string{
-		`{"data":[{"id":"msg_tool","type":"assistant","content":[{"type":"tool","id":"tool_effect","name":"shell","state":{"status":"completed"}}],"tokens":{"input":10,"output":2}}],"cursor":{"next":"page-2"}}`,
+		`{"data":[{"id":"msg_tool","type":"assistant","content":[{"type":"tool","id":"tool_effect","name":"shell","state":{"status":"completed"}}],"tokens":{"input":10,"output":2,"reasoning":20}}],"cursor":{"next":"page-2"}}`,
 		v2Page("503 temporarily unavailable"),
 	}}
 	result, err := v2Agent(f.server(t)).Run(context.Background(), RunOpts{CWD: t.TempDir(), Prompt: "do work", JSONSchema: json.RawMessage(`{"type":"object"}`)})
@@ -215,6 +215,9 @@ func TestOpencodeV2_PaginationFindsEarlierToolEffectsBeforeRejectingFinalOutput(
 	}
 	if result == nil || result.Usage.InputTokens != 27 {
 		t.Fatalf("earlier usage lost: %+v", result)
+	}
+	if result.Usage.OutputTokens != 27 || result.Usage.ReasoningTokens != 20 || !result.Usage.ReasoningReported {
+		t.Fatalf("paginated reasoning usage lost: %+v", result.Usage)
 	}
 	if f.count("GET /api/session/ses_fixture/message") != 2 || f.count("POST /api/session/ses_fixture/prompt") != 1 {
 		t.Fatal("projection incomplete or turn replayed")
@@ -402,5 +405,73 @@ func TestOpencodeV2Stream_DefersLaterTextUntilEarlierPartsEnd(t *testing.T) {
 	s.read(strings.NewReader(`data: {"type":"session.text.ended","data":{"sessionID":"session","assistantMessageID":"message","ordinal":0,"text":"hello "}}`+"\n\n"), opts)
 	if chunks.String() != "hello world" {
 		t.Fatalf("completed parts = %q, want hello world", chunks.String())
+	}
+}
+
+func TestOpencodeV2_ReasoningUsageMatchesTheProviderContract(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		field     string
+		output    int
+		reasoning int
+		reported  bool
+	}{
+		{name: "missing", output: 5},
+		{name: "null", field: `,"reasoning":null`, output: 5},
+		{name: "zero", field: `,"reasoning":0`, output: 5, reported: true},
+		{name: "positive", field: `,"reasoning":1000`, output: 1005, reasoning: 1000, reported: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tokens := `{"input":12,"output":5,"cache":{"read":3,"write":2}` + tc.field + `}`
+			want := TokenUsage{InputTokens: 17, OutputTokens: tc.output, CacheReadTokens: 3, CacheCreationTokens: 2, ReasoningTokens: tc.reasoning, ReasoningReported: tc.reported, Reported: true, CacheCreationReported: true}
+			for _, outcome := range []string{"succeeded", "failed"} {
+				t.Run(outcome, func(t *testing.T) {
+					f := &opencodeV2Fixture{outcome: outcome, pages: []string{`{"data":[{"id":"msg_final","type":"assistant","content":[{"type":"text","text":"OK"}],"tokens":` + tokens + `}],"cursor":{}}`}}
+					result, err := v2Agent(f.server(t)).Run(context.Background(), RunOpts{CWD: t.TempDir(), Prompt: "work"})
+					if (err != nil) != (outcome == "failed") {
+						t.Fatalf("outcome %s: %v", outcome, err)
+					}
+					if result == nil || result.Usage != want || !result.UsageReported {
+						t.Fatalf("projection result = %+v, want usage %+v", result, want)
+					}
+				})
+			}
+			for _, eventType := range []string{"session.step.ended", "session.step.failed"} {
+				t.Run(eventType, func(t *testing.T) {
+					s := opencodeV2Stream{sessionID: "ses_fixture", usage: map[string]TokenUsage{}}
+					event := `data: {"type":"` + eventType + `","data":{"sessionID":"ses_fixture","assistantMessageID":"msg_final","tokens":` + tokens + `}}` + "\n\n"
+					s.read(strings.NewReader(event+event), RunOpts{})
+					if usage := accumulateUsage(s.usage); usage != want {
+						t.Fatalf("SSE usage = %+v, want %+v", usage, want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestOpencodeV2_WaitFailureReturnsStreamedReasoningUsage(t *testing.T) {
+	streamRead := make(chan struct{})
+	f := &opencodeV2Fixture{
+		events: `data: {"type":"session.step.failed","data":{"sessionID":"ses_fixture","assistantMessageID":"msg_final","tokens":{"input":12,"output":5,"reasoning":1000}}}` + "\n\n" +
+			`data: {"type":"session.text.ended","data":{"sessionID":"ses_fixture","assistantMessageID":"msg_final","ordinal":0,"text":"done"}}` + "\n\n",
+		wait: func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-streamRead:
+			case <-r.Context().Done():
+				return
+			}
+			http.Error(w, "wait unavailable", http.StatusServiceUnavailable)
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result, err := v2Agent(f.server(t)).Run(ctx, RunOpts{CWD: t.TempDir(), Prompt: "work", OnChunk: func(string) { close(streamRead) }})
+	if err == nil {
+		t.Fatal("wait failure passed")
+	}
+	want := TokenUsage{InputTokens: 12, OutputTokens: 1005, ReasoningTokens: 1000, ReasoningReported: true, Reported: true}
+	if result == nil || result.Usage != want || !result.UsageReported {
+		t.Fatalf("failed turn result = %+v, want usage %+v", result, want)
 	}
 }
