@@ -8,7 +8,7 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor` and `devin`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `ci.rebase_behind`, `ci.carry_review_on_replay`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
+The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `ci.rebase_behind`, `ci.carry_review_on_replay`, `ci.release_after_checks_pass`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
@@ -912,6 +912,27 @@ The restart at Test is recorded with the carried approval, in the same write, an
 
 This value is read only from the trusted default-branch copy of this file, like the rest of the `ci` block: a pushed branch cannot let its own rebases skip Review.
 A value set here wins over the operator's own [`ci.carry_review_on_replay`](/no-mistakes/reference/global-config/#cicarry_review_on_replay) in both directions.
+
+### ci.release_after_checks_pass
+
+Whether the CI step finishes the run at its checks verdict instead of monitoring the pull request until it is merged or closed.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `false` |
+| Trust | Read only from the trusted default branch |
+
+```yaml
+ci:
+  release_after_checks_pass: true
+```
+
+- **`false` (default)** is what the step has always done: once every check is green the run records readiness and keeps watching the PR until it is merged, closed, or declined, and a later base-branch advance or conflict is still repaired on its own.
+- **`true`** finishes the step at that point. The run completes with the `checks_passed` status, releases its worktree, and reports `outcome: checks-passed`; whether and when the PR is merged is then the user's decision, and nothing observes the merge afterwards, so the recorded CI duration stops at the checks verdict instead of including the wait for a merge.
+
+This value is read only from the trusted default-branch copy of this file, like the rest of the `ci` block: a pushed branch cannot opt itself into the shorter run, or out of it.
+A value set here wins over the operator's own [`ci.release_after_checks_pass`](/no-mistakes/reference/global-config/#cirelease_after_checks_pass) in both directions.
 
 ### rebase.strategy
 

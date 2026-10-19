@@ -517,6 +517,10 @@ type RunInfo struct {
 	// tighten-only request to keep the generated Intent section out of the
 	// PR body (see runs.omit_intent).
 	OmitIntent bool `json:"omit_intent,omitempty"`
+	// QuotaRouting is the run's quota-aware agent-ordering record (the raw
+	// quotarouting.Record JSON) when the feature is on for this run, empty
+	// otherwise. Local-only observability; see internal/quotarouting.
+	QuotaRouting string `json:"quota_routing,omitempty"`
 	// AwaitingAgent is true while the run is parked at a gate awaiting the
 	// driving agent's response. AwaitingAgentSince is the unix-seconds time it
 	// parked, so a supervisor can read "parked for N seconds" in one call. Both
