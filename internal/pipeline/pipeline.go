@@ -147,6 +147,10 @@ type StepContext struct {
 	// ClosingIssueRefs are the explicit --closes values claimed from the DB at
 	// PR-step start. Steps read this snapshot instead of mutable run state.
 	ClosingIssueRefs []string
+
+	// All validation steps share the actual diff-base pin; runs.base_sha is
+	// the previous push, not necessarily the base resolved by a fresh fetch.
+	crashRetryBaseSHA *string
 }
 
 // RunAgentSession executes one turn of a durable review-loop role session,
@@ -162,6 +166,7 @@ func (sctx *StepContext) RunAgentSession(role SessionRole, opts agent.RunOpts) (
 
 // StepOutcome is the result of executing a pipeline step.
 type StepOutcome struct {
+	CIReadyNoCI   *bool
 	NeedsApproval bool // whether the step pauses for user action
 	AutoFixable   bool
 	Findings      string // JSON findings for TUI display (optional)

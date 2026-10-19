@@ -521,7 +521,7 @@ func TestOpencodeTurnFailure_GatesTheSharedClassifier(t *testing.T) {
 		if _, retry := classifyOpencodeTransient(conflict); retry {
 			t.Errorf("a thinking conflict with evidence %v must not be retried", evidence)
 		}
-		if !opencodeReplayUnsafe(conflict) {
+		if !IsReplayUnsafeError(conflict) {
 			t.Errorf("a thinking conflict with evidence %v must block the fresh-session fallback", evidence)
 		}
 		if !opencodeFallbackTrigger(conflict) {
@@ -531,17 +531,17 @@ func TestOpencodeTurnFailure_GatesTheSharedClassifier(t *testing.T) {
 		if _, retry := classifyOpencodeTransient(rejection); retry {
 			t.Errorf("an only-auto rejection with evidence %v must not be retried", evidence)
 		}
-		if !opencodeReplayUnsafe(rejection) {
+		if !IsReplayUnsafeError(rejection) {
 			t.Errorf("an only-auto rejection with evidence %v must block the fresh-session fallback", evidence)
 		}
 		if !opencodeFallbackTrigger(rejection) {
 			t.Errorf("an only-auto rejection with evidence %v must trigger the prompt-only fallback", evidence)
 		}
 	}
-	if opencodeReplayUnsafe(thinkingConflict(opencodeToolsNone, nil)) {
+	if IsReplayUnsafeError(thinkingConflict(opencodeToolsNone, nil)) {
 		t.Error("a conflict proven to be before any tool ran must still reach the fallback")
 	}
-	if opencodeReplayUnsafe(forcedToolChoiceConflict(opencodeToolsNone, nil)) {
+	if IsReplayUnsafeError(forcedToolChoiceConflict(opencodeToolsNone, nil)) {
 		t.Error("a rejection proven to be before any tool ran must still reach the fallback")
 	}
 }
@@ -786,5 +786,25 @@ func TestOpencodeAgent_LateMessageResponseWithToolPartWithholdsTheRetry(t *testi
 	}
 	if msg := err.Error(); !strings.Contains(msg, "not retried: the failed turn already ran tools") {
 		t.Errorf("expected the late tool part to be read as tool activity, got %q", msg)
+	}
+}
+
+func TestOpencodeAgent_QuotaFailurePreservesReplayEvidence(t *testing.T) {
+	for _, tools := range []bool{false, true} {
+		t.Run(fmt.Sprintf("tools=%t", tools), func(t *testing.T) {
+			parts := `[]`
+			if tools {
+				parts = `[{"type":"tool","tool":"bash"}]`
+			}
+			server, sent := opencodeErrorServer(t, `{"info":{"id":"msg1","role":"assistant","error":{"name":"APIError","data":{"message":"insufficient_quota","isRetryable":false}}},"parts":`+parts+`}`)
+			_, err := runOpencodeAgainst(t, server)
+			if err == nil || *sent != 1 {
+				t.Fatalf("quota failure = %v, requests=%d; want one failed turn", err, *sent)
+			}
+			wrapped := fmt.Errorf("agent invocation: %w", err)
+			if IsReplayUnsafeError(wrapped) != tools || IsQuotaExhaustionError(wrapped) == tools {
+				t.Fatalf("tools=%t: replay unsafe=%t quota switch=%t error=%v", tools, IsReplayUnsafeError(wrapped), IsQuotaExhaustionError(wrapped), err)
+			}
+		})
 	}
 }

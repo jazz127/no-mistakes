@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS runs (
     pr_state_observed_at    INTEGER,
     ci_ready_at             INTEGER,
     ci_ready_no_ci          INTEGER NOT NULL DEFAULT 0,
+    ci_released_at          INTEGER,
     last_pushed_sha         TEXT,
     push_target_kind        TEXT,
     push_target_fingerprint TEXT,
@@ -257,6 +258,10 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN verification_plan TEXT`,
 	`CREATE TRIGGER IF NOT EXISTS runs_verification_plan_immutable BEFORE UPDATE OF verification_plan ON runs WHEN NEW.verification_plan IS NOT OLD.verification_plan BEGIN SELECT RAISE(ABORT, 'run verification plan is immutable'); END`,
 	`ALTER TABLE runs ADD COLUMN pi_profile TEXT`,
+	// quota_routing records one run's quota-aware agent ordering (the
+	// quotarouting.Record JSON). Unlike pi_profile it is intentionally
+	// mutable: a mid-run quota switch appends to the record's switch list.
+	`ALTER TABLE runs ADD COLUMN quota_routing TEXT`,
 	`CREATE TRIGGER IF NOT EXISTS runs_pi_profile_immutable BEFORE UPDATE OF pi_profile ON runs WHEN NEW.pi_profile IS NOT OLD.pi_profile BEGIN SELECT RAISE(ABORT, 'run Pi profile is immutable'); END`,
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
@@ -315,6 +320,10 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN pr_state_observed_at INTEGER`,
 	`ALTER TABLE runs ADD COLUMN ci_ready_at INTEGER`,
 	`ALTER TABLE runs ADD COLUMN ci_ready_no_ci INTEGER NOT NULL DEFAULT 0`,
+	// The CI step's opt-in release verdict (ci.release_after_checks_pass). NULL
+	// means the step never released the run there, so its terminal status can
+	// never claim checks_passed for a run that merely monitored the PR.
+	`ALTER TABLE runs ADD COLUMN ci_released_at INTEGER`,
 	// Custody return is nullable: NULL means the pipeline still owns any
 	// unpublished head this run produced; a timestamp means an explicit
 	// guarded recovery ended that ownership (internal/branchsync).

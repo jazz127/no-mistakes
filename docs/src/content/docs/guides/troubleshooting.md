@@ -304,8 +304,7 @@ Check the [Provider Integration](/no-mistakes/guides/provider-integration/) requ
 
 Symptom: CI step keeps monitoring an open PR longer than expected, or pauses after the idle timeout.
 
-Monitoring while the PR remains open - even after checks are currently healthy - is intended behavior, because a later default-branch update can make the PR conflict or rerun CI.
-Once the CI monitor reports readiness and the PR is mergeable, the CI panel shows `✓ Checks passed` and the terminal title switches to `Checks passed`, so you can tell when to go merge the PR; the signal clears automatically if checks start re-running or a new failure appears. A trusted [`no_ci: true` declaration](/no-mistakes/reference/repo-config/#no_ci) can establish readiness for a zero-check repository; an empty forge response without that declaration is not ready. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the exact readiness and signal-clearing rules, including GitHub Actions runs that do not appear in the PR check rollup.
+By default, the run keeps monitoring the pull request after CI readiness is established, and ends when the PR is merged or closed. Ending it at readiness instead requires [`ci.release_after_checks_pass`](/no-mistakes/reference/repo-config/#cirelease_after_checks_pass). If the run has not finished, consult the [CI readiness rules](/no-mistakes/reference/pipeline-steps/#ci), including unresolved mergeability and checks missing from the PR rollup.
 
 How long the monitor runs is controlled by `ci_timeout` in `~/.no-mistakes/config.yaml`, an idle timeout that re-arms whenever the upstream default branch advances; the [`ci_timeout` field reference](/no-mistakes/reference/global-config/#ci_timeout) owns the default, the `unlimited` keyword and its aliases, and the exact re-arm semantics.
 Older config files may still contain an explicit `ci_timeout: "4h"` value; update it if you want the newer default behavior.
@@ -327,6 +326,8 @@ It does not cancel the step, fail the run, or mean the pipeline is safe to bypas
 Agent invocations have budgets even when the step looks quiet. The [global timeout reference](/no-mistakes/reference/global-config/#agent_timeout) owns silent budgets, optional still-working caps, and measured timeout diagnostics. Use those diagnostics to distinguish a turn that needs a larger silent budget from one that needs a still-working cap; changing `step_quiet_warning` changes only the status signal.
 
 The [Review](/no-mistakes/reference/pipeline-steps/#review), [Test](/no-mistakes/reference/pipeline-steps/#test), and [CI](/no-mistakes/reference/pipeline-steps/#ci) references explain whether a budget cut fails the run or parks for a decision, and how leftover work is handled.
+
+With [`agent_crash_retries`](/no-mistakes/reference/global-config/#agent_crash_retries) enabled, an eligible agent process exit or default-budget cut in Review, Test, Document, or Lint may retry the validation step in the same run under that setting’s safety proofs. Otherwise the step retains its normal failure or approval-park behavior.
 
 Start by reading the active run and the step log:
 
