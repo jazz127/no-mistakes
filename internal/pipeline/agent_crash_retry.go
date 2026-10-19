@@ -23,7 +23,7 @@ func retryableAgentCrash(ctx context.Context, err error, configuredTimeouts bool
 	}
 	// Includes an adapter's exhausted transient-retry loop: its underlying
 	// process exit must not receive a second retry budget here.
-	if agent.IsUsageLimitReached(err) || agent.IsTerminalProviderError(err) {
+	if agent.IsUsageLimitReached(err) || agent.IsTerminalProviderError(err) || agent.IsReplayUnsafeError(err) {
 		return false
 	}
 	var budgetCut *agentInvocationError

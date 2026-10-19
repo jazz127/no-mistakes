@@ -155,7 +155,7 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 	// whose tool activity could not be established. Same reasoning as
 	// classifyOpencodeTransient, and the same fail-closed answer: report the
 	// conflict and let the operator decide.
-	if opencodeReplayUnsafe(err) {
+	if IsReplayUnsafeError(err) {
 		return result, err
 	}
 

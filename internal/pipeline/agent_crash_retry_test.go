@@ -642,3 +642,116 @@ func TestExecutor_AgentCrashRetryHang(t *testing.T) {
 		})
 	}
 }
+
+func TestExecutor_AgentCrashRetryHonorsOpenCodeReplayEvidence(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "opencode.go")
+	bin := filepath.Join(dir, "opencode.exe")
+	const fakeOpenCode = `package main
+import (
+ "fmt"
+ "net/http"
+ "os"
+)
+func main() {
+ if len(os.Args) == 2 && os.Args[1] == "--version" {
+  fmt.Println("1.99.0")
+  return
+ }
+ port := ""
+ for i, arg := range os.Args {
+  if arg == "--port" { port = os.Args[i+1] }
+ }
+ mode := os.Getenv("NM_TEST_OPENCODE_EVIDENCE")
+ http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+  switch r.URL.Path {
+  case "/session":
+   fmt.Fprint(w, "{\"id\":\"s1\"}")
+  case "/global/event":
+   w.Header().Set("Content-Type", "text/event-stream")
+   if mode == "unknown" {
+    w.Header().Set("Content-Length", "1000")
+    fmt.Fprint(w, ": interrupted stream\n\n")
+    return
+   }
+   if mode == "ran" {
+    fmt.Fprint(w, "data: {\"payload\":{\"type\":\"message.part.updated\",\"properties\":{\"sessionID\":\"s1\",\"part\":{\"type\":\"tool\",\"tool\":\"bash\"}}}}\n\n")
+   }
+   fmt.Fprint(w, "data: {\"payload\":{\"type\":\"session.idle\"}}\n\n")
+  case "/session/s1/message":
+   if mode == "message" {
+    fmt.Fprint(w, "{\"info\":{\"id\":\"msg1\",\"role\":\"assistant\",\"error\":{\"name\":\"APIError\",\"data\":{\"message\":\"provider failure\",\"isRetryable\":false}}},\"parts\":[{\"type\":\"tool\",\"tool\":\"bash\"}]}")
+   } else {
+    w.WriteHeader(http.StatusBadRequest)
+    fmt.Fprint(w, "provider failure")
+   }
+  }
+ })
+ if err := http.ListenAndServe("127.0.0.1:"+port, nil); err != nil { panic(err) }
+}
+`
+	if err := os.WriteFile(source, []byte(fakeOpenCode), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("go", "build", "-o", bin, source).CombinedOutput(); err != nil {
+		t.Fatalf("build fake OpenCode: %v\n%s", err, output)
+	}
+	for _, mode := range []string{"message", "ran", "unknown", "none"} {
+		t.Run(mode, func(t *testing.T) {
+			database, p, _, repo := setupTest(t)
+			work := t.TempDir()
+			initGitRepo(t, work)
+			concrete, err := agent.New(types.AgentOpenCode, bin, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = concrete.Close() })
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			_, adapterErr := concrete.Run(ctx, agent.RunOpts{CWD: work, Prompt: "review", Env: []string{"NM_TEST_OPENCODE_EVIDENCE=" + mode}})
+			cancel()
+			if err := concrete.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if adapterErr == nil || agent.IsReplayUnsafeError(adapterErr) != (mode != "none") {
+				t.Fatalf("fixture did not produce the expected tool evidence: %v", adapterErr)
+			}
+			for _, timeout := range []bool{false, true} {
+				t.Run(map[bool]string{false: "exit", true: "timeout"}[timeout], func(t *testing.T) {
+					head, err := git.HeadSHA(context.Background(), work)
+					if err != nil {
+						t.Fatal(err)
+					}
+					run, err := database.InsertRun(repo.ID, "replay-evidence", head, head)
+					if err != nil {
+						t.Fatal(err)
+					}
+					failure := errors.Join(adapterErr, &exec.ExitError{})
+					if timeout {
+						failure = &agentInvocationError{message: "agent timed out", bound: "silent budget", cause: ErrAgentTimeout, adapter: adapterErr}
+					}
+					calls := 0
+					ag := &hangingAgent{name: "opencode", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+						calls++
+						if calls == 1 {
+							return nil, failure
+						}
+						return &agent.Result{}, nil
+					}}
+					step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+						_, err := sctx.RunAgent(agent.RunOpts{})
+						return &StepOutcome{}, err
+					}}
+					executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, ag, []Step{step}, nil)
+					execErr := executor.Execute(context.Background(), run, repo, work)
+					wantCalls := 1
+					if mode == "none" {
+						wantCalls = 2
+					}
+					if (execErr == nil) != (mode == "none") || calls != wantCalls {
+						t.Fatalf("error=%v calls=%d; want calls=%d and only proven tool-free failures retried", execErr, calls, wantCalls)
+					}
+				})
+			}
+		})
+	}
+}

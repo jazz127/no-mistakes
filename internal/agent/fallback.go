@@ -218,7 +218,7 @@ func (a *fallbackAgent) Close() error {
 }
 
 func isAgentUnavailableError(err error) bool {
-	if err == nil || IsStructuredOutputRejected(err) {
+	if err == nil || IsStructuredOutputRejected(err) || IsReplayUnsafeError(err) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())

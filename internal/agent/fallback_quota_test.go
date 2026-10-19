@@ -389,3 +389,50 @@ func TestQuotaFallbackRestoresEitherACPAliasSpelling(t *testing.T) {
 		}
 	}
 }
+
+func TestFallbackQuotaSwitchHonorsOpenCodeReplayEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		safe bool
+	}{
+		{"message ran tools", &opencodeMessageFailure{message: "insufficient_quota", terminal: true, toolActivity: true}, false},
+		{"message before tools", &opencodeMessageFailure{message: "insufficient_quota", terminal: true}, true},
+		{"ran tools marker", errors.Join(errors.New("opencode exited: insufficient_quota"), errOpencodeToolsAlreadyRan), false},
+		{"unknown tools marker", errors.Join(errors.New("opencode exited: insufficient_quota"), errOpencodeToolActivityUnknown), false},
+		{"proven no tools", opencodeTurnFailure(opencodeToolsNone, errors.New("opencode exited: insufficient_quota")), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			failure := fmt.Errorf("agent invocation: %w", tc.err)
+			if got := IsQuotaExhaustionError(failure); got != tc.safe {
+				t.Fatalf("quota switch eligible = %v, want %v", got, tc.safe)
+			}
+			firstResult := &Result{Text: "partial", Usage: TokenUsage{InputTokens: 17}}
+			first := &quotaTestAgent{name: "opencode", run: func(RunOpts) (*Result, error) {
+				return firstResult, failure
+			}}
+			next := &quotaTestAgent{name: "codex", run: func(RunOpts) (*Result, error) {
+				return &Result{Text: "ok"}, nil
+			}}
+			var events []LifecycleEvent
+			chain := NewFallback([]Agent{first, next}, WithQuotaSwitch(""))
+			result, err := chain.Run(context.Background(), RunOpts{
+				OnLifecycle: func(event LifecycleEvent) { events = append(events, event) },
+			})
+			if tc.safe {
+				if err != nil || result == nil || result.Text != "ok" || next.calls != 1 {
+					t.Fatalf("tool-free quota failure did not switch: result=%+v err=%v calls=%d", result, err, next.calls)
+				}
+				return
+			}
+			if !errors.Is(err, failure) || result != firstResult || first.calls != 1 || next.calls != 0 || chain.Name() != "opencode" {
+				t.Fatalf("unsafe turn replayed or report lost: result=%+v err=%v calls=%d/%d provider=%s", result, err, first.calls, next.calls, chain.Name())
+			}
+			for _, event := range events {
+				if event.Phase == LifecyclePhaseQuotaSwitch || event.Phase == LifecyclePhaseFallback {
+					t.Fatalf("unsafe turn emitted a switch: %+v", event)
+				}
+			}
+		})
+	}
+}
