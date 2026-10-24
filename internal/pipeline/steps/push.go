@@ -85,22 +85,15 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, fmt.Errorf("resolve head before push: %w", err)
 	}
 	if sctx.Config.Commands.Test != "" {
-		testState, err := configuredTestStateForHead(sctx, headBeingPushed)
+		required, err := finalFullTestRequired(sctx, headBeingPushed)
 		if err != nil {
 			return nil, err
 		}
-		if !testState.ranOnHead && testState.lastTestedHead != "" {
+		if required {
 			if err := recordAgentFixHead(sctx, s.Name(), headBeingPushed); err != nil {
 				return nil, err
 			}
-			sctx.Log(fmt.Sprintf("configured tests have not run on final head %s; running delta validation before push", headBeingPushed))
-			return &pipeline.StepOutcome{RestartFrom: types.StepTest}, nil
-		}
-		if testState.hadDelta && !testState.fullSatisfiedOnHead {
-			if err := recordAgentFixHead(sctx, s.Name(), headBeingPushed); err != nil {
-				return nil, err
-			}
-			sctx.Log(fmt.Sprintf("delta test runs were recorded; requiring a full configured test run on final head %s before push", headBeingPushed))
+			sctx.Log(fmt.Sprintf("requiring a successful full configured test run on final head %s before push", headBeingPushed))
 			return &pipeline.StepOutcome{RestartFrom: types.StepTest, RequireFinalFullTest: true}, nil
 		}
 	}
@@ -119,18 +112,13 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	return &pipeline.StepOutcome{}, nil
 }
 
-type configuredTestState struct {
-	lastTestedHead      string
-	ranOnHead           bool
-	hadDelta            bool
-	fullSatisfiedOnHead bool
-}
-
-func configuredTestStateForHead(sctx *pipeline.StepContext, headSHA string) (configuredTestState, error) {
-	state := configuredTestState{}
+func finalFullTestRequired(sctx *pipeline.StepContext, headSHA string) (bool, error) {
+	if sctx.Config.Commands.Test == "" {
+		return false, nil
+	}
 	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
 	if err != nil {
-		return state, fmt.Errorf("load Test rounds before push: %w", err)
+		return false, fmt.Errorf("load Test rounds before push: %w", err)
 	}
 	for _, step := range steps {
 		if step.StepName != types.StepTest {
@@ -138,7 +126,7 @@ func configuredTestStateForHead(sctx *pipeline.StepContext, headSHA string) (con
 		}
 		rounds, err := sctx.DB.GetRoundsByStep(step.ID)
 		if err != nil {
-			return state, fmt.Errorf("load Test round evidence before push: %w", err)
+			return false, fmt.Errorf("load Test round evidence before push: %w", err)
 		}
 		for _, round := range rounds {
 			if round.FindingsJSON == nil {
@@ -146,46 +134,18 @@ func configuredTestStateForHead(sctx *pipeline.StepContext, headSHA string) (con
 			}
 			findings, err := types.ParseFindingsJSON(*round.FindingsJSON)
 			if err != nil {
-				if strings.Contains(*round.FindingsJSON, `"test_mode"`) {
-					return state, fmt.Errorf("parse configured Test mode evidence for push: %w", err)
-				}
-				continue
+				return false, fmt.Errorf("parse configured Test evidence for push: %w", err)
 			}
-			if findings.TestMode == "" {
-				continue
+			if configuredTestReceiptMatches(sctx, findings) && findings.TestMode == "full" &&
+				findings.TestCommandPassed && findings.TestedHeadSHA == headSHA {
+				return false, nil
 			}
-			if findings.TestedHeadSHA == "" {
-				return state, fmt.Errorf("configured Test mode evidence in round %d has no tested head", round.Round)
-			}
-			if findings.TestMode != "full" && findings.TestMode != "delta" {
-				return state, fmt.Errorf("unknown configured Test mode %q in round %d", findings.TestMode, round.Round)
-			}
-			state.lastTestedHead = findings.TestedHeadSHA
-			state.ranOnHead = state.ranOnHead || findings.TestCommandRan && findings.TestedHeadSHA == headSHA
-			state.hadDelta = state.hadDelta || findings.TestMode == "delta" && findings.TestCommandRan
-			state.fullSatisfiedOnHead = state.fullSatisfiedOnHead || findings.TestMode == "full" && findings.TestCommandPassed && findings.TestedHeadSHA == headSHA
 		}
-		if step.Status == types.StepStatusCompleted && step.OverrideReason != nil && *step.OverrideReason != "" && step.FindingsJSON != nil {
-			findings, err := types.ParseFindingsJSON(*step.FindingsJSON)
-			if err != nil {
-				return state, fmt.Errorf("parse approved configured Test evidence for push: %w", err)
-			}
-			state.fullSatisfiedOnHead = state.fullSatisfiedOnHead || findings.TestMode == "full" && findings.TestCommandRan && findings.TestedHeadSHA == headSHA
+		if step.Status == types.StepStatusSkipped {
+			return false, fmt.Errorf("cannot validate final head %s: configured Test step is skipped; required validation cannot be restarted", headSHA)
 		}
-		if step.Status == types.StepStatusSkipped && ((!state.ranOnHead && state.lastTestedHead != "") || (state.hadDelta && !state.fullSatisfiedOnHead)) {
-			return state, fmt.Errorf("cannot validate final head %s: configured Test step is skipped; required validation cannot be restarted", headSHA)
-		}
-		return state, nil
 	}
-	return state, nil
-}
-
-func finalFullTestRequired(sctx *pipeline.StepContext, headSHA string) (bool, error) {
-	state, err := configuredTestStateForHead(sctx, headSHA)
-	if err != nil {
-		return false, err
-	}
-	return state.hadDelta && !state.fullSatisfiedOnHead, nil
+	return true, nil
 }
 
 // publishRunHead is the single guarded publication path for a run's head. Both

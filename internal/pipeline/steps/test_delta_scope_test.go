@@ -18,7 +18,7 @@ import (
 
 func TestConfiguredTestRunMode_FirstRunIsFullAndFixRerunIsDelta(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "true"})
 	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
 	if err != nil {
 		t.Fatal(err)
@@ -29,7 +29,7 @@ func TestConfiguredTestRunMode_FirstRunIsFullAndFixRerunIsDelta(t *testing.T) {
 	if mode != "full" || since != "" || passed {
 		t.Fatalf("first run mode = (%q, %q, %t), want (full, empty, false)", mode, since, passed)
 	}
-	prior := types.Findings{TestMode: "full", TestedHeadSHA: "previous-head", TestCommandPassed: true, TestCommandRan: true}
+	prior := types.Findings{TestCommand: sctx.Config.Commands.Test, TestMode: "full", TestedHeadSHA: "previous-head", TestCommandPassed: true, TestCommandRan: true}
 	raw, _ := json.Marshal(prior)
 	if _, err := sctx.DB.InsertStepRound(sr.ID, 1, "initial", testStringPtr(string(raw)), nil, 1); err != nil {
 		t.Fatal(err)
@@ -145,14 +145,14 @@ func TestConfiguredTestCommandLifecycle(t *testing.T) {
 
 func TestConfiguredTestRunModeReusesFullPassOnSameHead(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "true"})
 	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sctx.StepResultID = sr.ID
 	recordTestModeRound(t, sctx, sr.ID, types.Findings{
-		TestMode: "full", TestedHeadSHA: headSHA, TestCommandPassed: true, TestCommandRan: true,
+		TestCommand: sctx.Config.Commands.Test, TestMode: "full", TestedHeadSHA: headSHA, TestCommandPassed: true, TestCommandRan: true,
 	})
 	mode, since, passed := configuredTestRunMode(sctx)
 	if mode != "full" || since != "" || !passed {
@@ -165,6 +165,72 @@ func TestConfiguredTestRunModeReusesFullPassOnSameHead(t *testing.T) {
 	}
 }
 
+func TestConfiguredTestCommandChangeInvalidatesReceipts(t *testing.T) {
+	for _, mode := range []string{"full", "delta"} {
+		for _, command := range []string{"exit 0", ""} {
+			t.Run(mode+"/recorded-command="+command, func(t *testing.T) {
+				dir, baseSHA, headSHA := setupGitRepo(t)
+				ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+					if opts.Purpose == "test-fix" {
+						return &agent.Result{Output: json.RawMessage(`{"summary":"No changes applied"}`)}, nil
+					}
+					return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+				}}
+				sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{
+					Test: `printf '%s|%s\n' "$NO_MISTAKES_TEST_MODE" "${NO_MISTAKES_TEST_SINCE-unset}" >> "$TEST_RECEIPT"`,
+				})
+				receipt := filepath.Join(t.TempDir(), "commands.txt")
+				sctx.Env = []string{"TEST_RECEIPT=" + receipt}
+				sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				sctx.StepResultID = sr.ID
+				recordTestModeRound(t, sctx, sr.ID, types.Findings{
+					TestCommand: command, TestMode: mode, TestedHeadSHA: headSHA,
+					TestCommandRan: true, TestCommandPassed: true,
+				})
+				outcome, err := (&PushStep{}).Execute(sctx)
+				if err != nil || outcome.RestartFrom != types.StepTest || !outcome.RequireFinalFullTest {
+					t.Fatalf("Push accepted a receipt for a different or unknown command: %+v, %v", outcome, err)
+				}
+				sctx.Fixing = true
+				outcome, err = (&TestStep{}).Execute(sctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := os.ReadFile(receipt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(got) != "full|unset\n" {
+					t.Fatalf("new command must run in full without the old delta anchor: %q", got)
+				}
+				findings, err := types.ParseFindingsJSON(outcome.Findings)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if findings.TestCommand != sctx.Config.Commands.Test || !findings.TestCommandRan || !findings.TestCommandPassed {
+					t.Fatalf("new command receipt = %+v", findings)
+				}
+				recordTestModeRound(t, sctx, sr.ID, findings)
+				if required, err := finalFullTestRequired(sctx, headSHA); err != nil || required {
+					t.Fatalf("new command's full pass did not satisfy Push: %t, %v", required, err)
+				}
+				sctx.ForceFullTest = true
+				sctx.PreviousFindings = outcome.Findings
+				if _, err := (&TestStep{}).Execute(sctx); err != nil {
+					t.Fatal(err)
+				}
+				got, err = os.ReadFile(receipt)
+				if err != nil || string(got) != "full|unset\n" {
+					t.Fatalf("same command's successful full run was repeated on the same head: %q, %v", got, err)
+				}
+			})
+		}
+	}
+}
+
 func TestFinalFullTestGateRequiresFullPassOnPushedHead(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "true"})
@@ -173,7 +239,7 @@ func TestFinalFullTestGateRequiresFullPassOnPushedHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	recordTestModeRound(t, sctx, sr.ID, types.Findings{
-		TestMode: "delta", TestSinceSHA: baseSHA, TestedHeadSHA: headSHA, TestCommandPassed: true, TestCommandRan: true,
+		TestCommand: sctx.Config.Commands.Test, TestMode: "delta", TestSinceSHA: baseSHA, TestedHeadSHA: headSHA, TestCommandPassed: true, TestCommandRan: true,
 	})
 	needsFull, err := finalFullTestRequired(sctx, headSHA)
 	if err != nil || !needsFull {
@@ -181,7 +247,7 @@ func TestFinalFullTestGateRequiresFullPassOnPushedHead(t *testing.T) {
 	}
 
 	recordTestModeRound(t, sctx, sr.ID, types.Findings{
-		TestMode: "full", TestedHeadSHA: headSHA, TestCommandPassed: true, TestCommandRan: true,
+		TestCommand: sctx.Config.Commands.Test, TestMode: "full", TestedHeadSHA: headSHA, TestCommandPassed: true, TestCommandRan: true,
 	})
 	needsFull, err = finalFullTestRequired(sctx, headSHA)
 	if err != nil || needsFull {
@@ -190,10 +256,6 @@ func TestFinalFullTestGateRequiresFullPassOnPushedHead(t *testing.T) {
 	needsFull, err = finalFullTestRequired(sctx, "later-head")
 	if err != nil || !needsFull {
 		t.Fatalf("full pass on earlier head satisfies later head = (%t, %v), want (true, nil)", needsFull, err)
-	}
-	state, err := configuredTestStateForHead(sctx, "later-head")
-	if err != nil || state.ranOnHead || state.lastTestedHead != headSHA {
-		t.Fatalf("state for an untested final head = (%+v, %v), want last head %s and no run on target", state, err, headSHA)
 	}
 }
 
@@ -205,7 +267,7 @@ func TestPushStepRestartsAtTestForFinalFullRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	recordTestModeRound(t, sctx, sr.ID, types.Findings{
-		TestMode: "delta", TestSinceSHA: baseSHA, TestedHeadSHA: headSHA, TestCommandPassed: true, TestCommandRan: true,
+		TestCommand: sctx.Config.Commands.Test, TestMode: "delta", TestSinceSHA: baseSHA, TestedHeadSHA: headSHA, TestCommandPassed: true, TestCommandRan: true,
 	})
 
 	outcome, err := (&PushStep{}).Execute(sctx)
@@ -272,10 +334,9 @@ func TestConfiguredTestTimeoutReceiptsDoNotCertifyCommandHistory(t *testing.T) {
 			}
 			sctx.StepResultID = sr.ID
 			wantHead := ""
-			wantModes := 0
 			if phase != "initial evidence" {
 				sctx.Fixing = true
-				prior := types.Findings{TestMode: "full", TestedHeadSHA: baseSHA, TestCommandRan: true, TestCommandPassed: true,
+				prior := types.Findings{TestCommand: sctx.Config.Commands.Test, TestMode: "full", TestedHeadSHA: baseSHA, TestCommandRan: true, TestCommandPassed: true,
 					Items: []types.Finding{{ID: "test-1", Severity: types.FindingSeverityError, Description: "repair behavior", Action: types.ActionAutoFix}}}
 				raw, err := json.Marshal(prior)
 				if err != nil {
@@ -284,7 +345,6 @@ func TestConfiguredTestTimeoutReceiptsDoNotCertifyCommandHistory(t *testing.T) {
 				sctx.PreviousFindings = string(raw)
 				recordTestModeRound(t, sctx, sr.ID, prior)
 				wantHead = baseSHA
-				wantModes = 1
 			}
 			outcome, err := (&TestStep{}).Execute(sctx)
 			if err != nil {
@@ -300,24 +360,17 @@ func TestConfiguredTestTimeoutReceiptsDoNotCertifyCommandHistory(t *testing.T) {
 			if findings.TestedHeadSHA != wantHead {
 				t.Fatalf("timeout changed the live-evidence head: got %q, want %q", findings.TestedHeadSHA, wantHead)
 			}
-			if findings.TestMode != "" || findings.TestSinceSHA != "" || findings.TestCommandRan || findings.TestCommandPassed || findings.BaseTestMode != "" || findings.BaseTestHeadSHA != "" {
+			if findings.TestMode != "" || findings.TestSinceSHA != "" || findings.TestCommandRan || findings.TestCommandPassed || findings.TestCommand != "" {
 				t.Fatalf("timeout certified a command receipt: %+v", findings)
 			}
 			recordTestModeRound(t, sctx, sr.ID, findings)
-			state, err := configuredTestStateForHead(sctx, headSHA)
-			if err != nil || state.lastTestedHead != wantHead || state.ranOnHead || state.hadDelta {
-				t.Fatalf("timeout changed command history: %+v, %v", state, err)
-			}
 			mode, since, passed := configuredTestRunMode(sctx)
 			if passed || wantHead == "" && (mode != "full" || since != "") || wantHead != "" && (mode != "delta" || since != wantHead) {
 				t.Fatalf("timeout changed retry selection: %q, %q, %t", mode, since, passed)
 			}
-			rounds, err := sctx.DB.GetRoundsByStep(sr.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if modes := collectConfiguredTestModes(sr, rounds); len(modes) != wantModes {
-				t.Fatalf("PR ledger included the timeout receipt: %v", modes)
+			pushOutcome, err := (&PushStep{}).Execute(sctx)
+			if err != nil || pushOutcome.RestartFrom != types.StepTest || !pushOutcome.RequireFinalFullTest {
+				t.Fatalf("timeout must require final full before push: %+v, %v", pushOutcome, err)
 			}
 			sctx.Fixing = false
 			sctx.ForceFullTest = true
@@ -341,25 +394,62 @@ func TestConfiguredTestTimeoutReceiptsDoNotCertifyCommandHistory(t *testing.T) {
 }
 
 func TestPushStepRecordsFormatterHeadBeforeTestRestarts(t *testing.T) {
-	for _, mode := range []string{"full", "delta"} {
+	for _, mode := range []string{"full", "delta", "missing", "timeout"} {
 		t.Run(mode, func(t *testing.T) {
 			dir, baseSHA, headSHA := setupGitRepo(t)
 			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 				return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
 			}}
-			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0", Format: "echo formatted > feature.txt"})
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{
+				Test:   `printf '%s|%s\n' "$NO_MISTAKES_TEST_MODE" "${NO_MISTAKES_TEST_SINCE-unset}" >> "$TEST_RECEIPT"`,
+				Format: "echo formatted > feature.txt",
+			})
+			receipt := filepath.Join(t.TempDir(), "commands.txt")
+			sctx.Env = []string{"TEST_RECEIPT=" + receipt}
+			upstream := t.TempDir()
+			gitCmd(t, upstream, "init", "--bare")
+			gitCmd(t, dir, "remote", "set-url", "origin", upstream)
+			gitCmd(t, dir, "push", "origin", "main")
+			gitCmd(t, dir, "push", "origin", "feature")
+			sctx.Repo.UpstreamURL = upstream
+			setupGateMirror(t, sctx)
+			recordReviewApproval(t, sctx, headSHA)
 			sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
 			if err != nil {
 				t.Fatal(err)
 			}
 			sctx.StepResultID = sr.ID
-			recordTestModeRound(t, sctx, sr.ID, types.Findings{TestMode: mode, TestedHeadSHA: headSHA, TestCommandRan: true, TestCommandPassed: true})
+			if mode == "timeout" {
+				ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					return nil, errTestAgentTimeout
+				}
+				outcome, err := (&TestStep{}).Execute(sctx)
+				if err != nil || !outcome.NeedsApproval {
+					t.Fatalf("expected evidence timeout: %+v, %v", outcome, err)
+				}
+				findings, err := types.ParseFindingsJSON(outcome.Findings)
+				if err != nil {
+					t.Fatal(err)
+				}
+				recordTestModeRound(t, sctx, sr.ID, findings)
+				if err := sctx.DB.CompleteStep(sr.ID, 0, 1, "test.log"); err != nil {
+					t.Fatal(err)
+				}
+				ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+				}
+			} else if mode != "missing" {
+				recordTestModeRound(t, sctx, sr.ID, types.Findings{TestCommand: sctx.Config.Commands.Test, TestMode: mode, TestedHeadSHA: headSHA, TestCommandRan: true, TestCommandPassed: true})
+			}
 			outcome, err := (&PushStep{}).Execute(sctx)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if outcome.RestartFrom != types.StepTest || outcome.RequireFinalFullTest {
-				t.Fatalf("formatter head needs delta validation first: %+v", outcome)
+			if outcome.RestartFrom != types.StepTest || !outcome.RequireFinalFullTest {
+				t.Fatalf("formatter head needs final full validation directly: %+v", outcome)
+			}
+			if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != headSHA {
+				t.Fatalf("Push published an untested formatter head: %s", got)
 			}
 			formattedHead := gitCmd(t, dir, "rev-parse", "HEAD")
 			run, err := sctx.DB.GetRun(sctx.Run.ID)
@@ -369,6 +459,7 @@ func TestPushStepRecordsFormatterHeadBeforeTestRestarts(t *testing.T) {
 			if formattedHead == headSHA || run.HeadSHA != formattedHead || sctx.Run.HeadSHA != formattedHead {
 				t.Fatalf("formatter head not adopted: live=%s recorded=%s memory=%s", formattedHead, run.HeadSHA, sctx.Run.HeadSHA)
 			}
+			sctx.ForceFullTest = outcome.RequireFinalFullTest
 			outcome, err = (&TestStep{}).Execute(sctx)
 			if err != nil {
 				t.Fatal(err)
@@ -377,13 +468,30 @@ func TestPushStepRecordsFormatterHeadBeforeTestRestarts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if findings.TestMode != "delta" || findings.TestSinceSHA != headSHA || findings.TestedHeadSHA != formattedHead || !findings.TestCommandRan {
+			if findings.TestMode != "full" || findings.TestSinceSHA != "" || findings.TestedHeadSHA != formattedHead || !findings.TestCommandRan {
 				t.Fatalf("Test reused the pre-formatter result: %+v", findings)
 			}
 			recordTestModeRound(t, sctx, sr.ID, findings)
+			if required, err := finalFullTestRequired(sctx, formattedHead); err != nil || required {
+				t.Fatalf("full pass did not satisfy Push: required=%t error=%v", required, err)
+			}
 			outcome, err = (&PushStep{}).Execute(sctx)
-			if err != nil || outcome.RestartFrom != types.StepTest || !outcome.RequireFinalFullTest {
-				t.Fatalf("Push did not advance to final full: %+v, %v", outcome, err)
+			if err != nil || outcome.RestartFrom != "" {
+				t.Fatalf("Push after final full: %+v, %v", outcome, err)
+			}
+			if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != formattedHead {
+				t.Fatalf("Push head = %s, want validated head %s", got, formattedHead)
+			}
+			got, err := os.ReadFile(receipt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "full|unset\n"
+			if mode == "timeout" {
+				want += "full|unset\n"
+			}
+			if string(got) != want {
+				t.Fatalf("expected one full invocation on the formatter head: got %q, want %q", got, want)
 			}
 		})
 	}
@@ -394,13 +502,15 @@ func TestConfiguredTestFinalFullRequestIsConsumedByOneAttempt(t *testing.T) {
 	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 		return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
 	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 7"})
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: `test -f "$TEST_SUCCESS_FILE"`})
+	successFile := filepath.Join(t.TempDir(), "passed")
+	sctx.Env = []string{"TEST_SUCCESS_FILE=" + successFile}
 	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sctx.StepResultID = sr.ID
-	recordTestModeRound(t, sctx, sr.ID, types.Findings{TestMode: "delta", TestedHeadSHA: headSHA, TestSinceSHA: baseSHA, TestCommandRan: true, TestCommandPassed: true})
+	recordTestModeRound(t, sctx, sr.ID, types.Findings{TestCommand: sctx.Config.Commands.Test, TestMode: "delta", TestedHeadSHA: headSHA, TestSinceSHA: baseSHA, TestCommandRan: true, TestCommandPassed: true})
 	sctx.ForceFullTest = true
 	outcome, err := (&TestStep{}).Execute(sctx)
 	if err != nil {
@@ -414,7 +524,9 @@ func TestConfiguredTestFinalFullRequestIsConsumedByOneAttempt(t *testing.T) {
 		t.Fatalf("failed final full did not consume its request: %+v, force=%t", findings, sctx.ForceFullTest)
 	}
 	recordTestModeRound(t, sctx, sr.ID, findings)
-	sctx.Config.Commands.Test = "exit 0"
+	if err := os.WriteFile(successFile, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	sctx.Fixing = true
 	sctx.PreviousFindings = outcome.Findings
 	outcome, err = (&TestStep{}).Execute(sctx)
@@ -447,7 +559,7 @@ func TestPushStepRecordsAdvancedHeadBeforeFinalFullRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recordTestModeRound(t, sctx, sr.ID, types.Findings{TestMode: "delta", TestedHeadSHA: formattedHead, TestCommandRan: true, TestCommandPassed: true})
+	recordTestModeRound(t, sctx, sr.ID, types.Findings{TestCommand: sctx.Config.Commands.Test, TestMode: "delta", TestedHeadSHA: formattedHead, TestCommandRan: true, TestCommandPassed: true})
 	outcome, err := (&PushStep{}).Execute(sctx)
 	if err != nil || outcome.RestartFrom != types.StepTest || !outcome.RequireFinalFullTest {
 		t.Fatalf("Push outcome = %+v, %v, want final full restart", outcome, err)
@@ -461,7 +573,7 @@ func TestPushStepRecordsAdvancedHeadBeforeFinalFullRestart(t *testing.T) {
 	}
 }
 
-func TestFinalFullTestGateHonorsApprovedFailureOnlyOnItsHead(t *testing.T) {
+func TestFinalFullTestGateRequiresSuccessDespiteApprovedFailure(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "exit 7"})
 	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
@@ -469,8 +581,8 @@ func TestFinalFullTestGateHonorsApprovedFailureOnlyOnItsHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	sctx.StepResultID = sr.ID
-	recordTestModeRound(t, sctx, sr.ID, types.Findings{TestMode: "delta", TestedHeadSHA: headSHA, TestCommandRan: true, TestCommandPassed: true})
-	failed := types.Findings{TestMode: "full", TestedHeadSHA: headSHA, TestCommandRan: true,
+	recordTestModeRound(t, sctx, sr.ID, types.Findings{TestCommand: sctx.Config.Commands.Test, TestMode: "delta", TestedHeadSHA: headSHA, TestCommandRan: true, TestCommandPassed: true})
+	failed := types.Findings{TestCommand: sctx.Config.Commands.Test, TestMode: "full", TestedHeadSHA: headSHA, TestCommandRan: true,
 		Items: []types.Finding{{Severity: types.FindingSeverityError, Category: types.FindingCategoryTestCommand, Description: "configured test command failed with exit code 7"}}}
 	recordTestModeRound(t, sctx, sr.ID, failed)
 	raw, err := json.Marshal(failed)
@@ -496,8 +608,8 @@ func TestFinalFullTestGateHonorsApprovedFailureOnlyOnItsHead(t *testing.T) {
 	if err := sctx.DB.CompleteStep(sr.ID, 7, 1, "test.log"); err != nil {
 		t.Fatal(err)
 	}
-	if required, err := finalFullTestRequired(sctx, headSHA); err != nil || required {
-		t.Fatalf("approved final full failure restarted Test: %t, %v", required, err)
+	if required, err := finalFullTestRequired(sctx, headSHA); err != nil || !required {
+		t.Fatalf("approved failure satisfied final full: %t, %v", required, err)
 	}
 	if required, err := finalFullTestRequired(sctx, "later-head"); err != nil || !required {
 		t.Fatalf("approval satisfied a different head: %t, %v", required, err)
@@ -514,7 +626,7 @@ func TestFinalFullTestGateHonorsApprovedFailureOnlyOnItsHead(t *testing.T) {
 }
 
 func TestPushStepRefusesRestartWhenPersistedTestIsSkipped(t *testing.T) {
-	for _, validation := range []string{"delta on a new head", "final full after delta"} {
+	for _, validation := range []string{"no command history", "full on an earlier head", "final full after delta"} {
 		t.Run(validation, func(t *testing.T) {
 			dir, baseSHA, headSHA := setupGitRepo(t)
 			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "exit 7"})
@@ -522,12 +634,14 @@ func TestPushStepRefusesRestartWhenPersistedTestIsSkipped(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			failed := types.Findings{TestMode: "full", TestedHeadSHA: baseSHA, TestCommandRan: true}
+			failed := types.Findings{TestCommand: sctx.Config.Commands.Test, TestMode: "full", TestedHeadSHA: baseSHA, TestCommandRan: true}
 			if validation == "final full after delta" {
-				recordTestModeRound(t, sctx, sr.ID, types.Findings{TestMode: "delta", TestedHeadSHA: headSHA, TestSinceSHA: baseSHA, TestCommandRan: true, TestCommandPassed: true})
+				recordTestModeRound(t, sctx, sr.ID, types.Findings{TestCommand: sctx.Config.Commands.Test, TestMode: "delta", TestedHeadSHA: headSHA, TestSinceSHA: baseSHA, TestCommandRan: true, TestCommandPassed: true})
 				failed.TestedHeadSHA = headSHA
 			}
-			recordTestModeRound(t, sctx, sr.ID, failed)
+			if validation != "no command history" {
+				recordTestModeRound(t, sctx, sr.ID, failed)
+			}
 			raw, err := json.Marshal(failed)
 			if err != nil {
 				t.Fatal(err)
@@ -555,7 +669,7 @@ func TestPushStepRefusesRestartWhenPersistedTestIsSkipped(t *testing.T) {
 }
 
 func TestConfiguredTestSkipWithoutOutstandingValidationDoesNotFail(t *testing.T) {
-	for _, history := range []string{"no command history", "full pass on final head", "full pass after delta"} {
+	for _, history := range []string{"full pass on final head", "full pass after delta"} {
 		t.Run(history, func(t *testing.T) {
 			dir, baseSHA, headSHA := setupGitRepo(t)
 			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
@@ -564,11 +678,9 @@ func TestConfiguredTestSkipWithoutOutstandingValidationDoesNotFail(t *testing.T)
 				t.Fatal(err)
 			}
 			if history == "full pass after delta" {
-				recordTestModeRound(t, sctx, sr.ID, types.Findings{TestMode: "delta", TestedHeadSHA: headSHA, TestSinceSHA: baseSHA, TestCommandRan: true, TestCommandPassed: true})
+				recordTestModeRound(t, sctx, sr.ID, types.Findings{TestCommand: sctx.Config.Commands.Test, TestMode: "delta", TestedHeadSHA: headSHA, TestSinceSHA: baseSHA, TestCommandRan: true, TestCommandPassed: true})
 			}
-			if history != "no command history" {
-				recordTestModeRound(t, sctx, sr.ID, types.Findings{TestMode: "full", TestedHeadSHA: headSHA, TestCommandRan: true, TestCommandPassed: true})
-			}
+			recordTestModeRound(t, sctx, sr.ID, types.Findings{TestCommand: sctx.Config.Commands.Test, TestMode: "full", TestedHeadSHA: headSHA, TestCommandRan: true, TestCommandPassed: true})
 			if err := sctx.DB.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 1, "test.log"); err != nil {
 				t.Fatal(err)
 			}

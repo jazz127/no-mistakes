@@ -381,8 +381,7 @@ type Findings struct {
 	TestSinceSHA      string `json:"test_since_sha,omitempty"`
 	TestCommandPassed bool   `json:"test_command_passed,omitempty"`
 	TestCommandRan    bool   `json:"test_command_ran,omitempty"`
-	BaseTestMode      string `json:"base_test_mode,omitempty"`
-	BaseTestHeadSHA   string `json:"base_test_head_sha,omitempty"`
+	TestCommand       string `json:"test_command,omitempty"`
 	// UnvalidatedSinceSHA is set only on a Test budget-cut park: the head its
 	// unvalidated-work check measured from, carried so a repeated cut before any
 	// evidence turn completes re-measures from that same head.
@@ -408,8 +407,7 @@ type findingsWire struct {
 	TestSinceSHA        string             `json:"test_since_sha"`
 	TestCommandPassed   bool               `json:"test_command_passed"`
 	TestCommandRan      bool               `json:"test_command_ran"`
-	BaseTestMode        string             `json:"base_test_mode"`
-	BaseTestHeadSHA     string             `json:"base_test_head_sha"`
+	TestCommand         string             `json:"test_command"`
 	UnvalidatedSinceSHA string             `json:"unvalidated_since_sha"`
 	RiskLevel           string             `json:"risk_level"`
 	RiskRationale       string             `json:"risk_rationale"`
@@ -448,8 +446,7 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		TestSinceSHA:        wire.TestSinceSHA,
 		TestCommandPassed:   wire.TestCommandPassed,
 		TestCommandRan:      wire.TestCommandRan,
-		BaseTestMode:        wire.BaseTestMode,
-		BaseTestHeadSHA:     wire.BaseTestHeadSHA,
+		TestCommand:         wire.TestCommand,
 		UnvalidatedSinceSHA: wire.UnvalidatedSinceSHA,
 		RiskLevel:           wire.RiskLevel,
 		RiskRationale:       wire.RiskRationale,

@@ -35,7 +35,7 @@ func configuredTestRunMode(sctx *pipeline.StepContext) (mode, since string, full
 			continue
 		}
 		findings, err := types.ParseFindingsJSON(*round.FindingsJSON)
-		if err != nil || findings.TestMode == "" || findings.TestedHeadSHA == "" {
+		if err != nil || !configuredTestReceiptMatches(sctx, findings) {
 			continue
 		}
 		lastTestedHead = findings.TestedHeadSHA
@@ -47,6 +47,12 @@ func configuredTestRunMode(sctx *pipeline.StepContext) (mode, since string, full
 		return "full", "", fullAlreadyPassed
 	}
 	return "delta", lastTestedHead, false
+}
+
+func configuredTestReceiptMatches(sctx *pipeline.StepContext, findings types.Findings) bool {
+	return sctx.Config.Commands.Test != "" && findings.TestCommand == sctx.Config.Commands.Test &&
+		(findings.TestMode == "full" || findings.TestMode == "delta") && findings.TestedHeadSHA != "" &&
+		(findings.TestCommandRan || findings.TestCommandPassed)
 }
 
 func testModeLogLine(mode, since string) string {
@@ -170,12 +176,9 @@ Previous test findings to address:
 	}
 
 	testCmd := sctx.Config.Commands.Test
-	testMode, testSince, priorFullPassed := configuredTestRunMode(sctx)
-	reuseFullPass := priorFullPassed && !sctx.ForceFullTest
+	testMode, testSince, reuseFullPass := configuredTestRunMode(sctx)
 	testCommandRan := false
 	testCommandPassed := false
-	baseTestMode := ""
-	baseTestSHA := ""
 	tested := []string{}
 	var baselineResults []checkResult
 	var baselineFindings []Finding
@@ -237,10 +240,6 @@ Previous test findings to address:
 					return nil, err
 				}
 				attributionSection = attribution.render()
-				if attribution.unavailable == "" {
-					baseTestMode = "full"
-					baseTestSHA = baseSHA
-				}
 				baselineSummary = attributionSection + "\n\n" + baselineSummary
 			}
 		}
@@ -398,8 +397,7 @@ Rules:
 	findings.TestSinceSHA = testSince
 	findings.TestCommandRan = testCommandRan
 	findings.TestCommandPassed = testCommandPassed
-	findings.BaseTestMode = baseTestMode
-	findings.BaseTestHeadSHA = baseTestSHA
+	findings.TestCommand = testCmd
 	findings.Items = append(baselineFindings, findings.Items...)
 	if baselineSummary != "" {
 		findings.Summary = strings.TrimSpace(strings.Join([]string{baselineSummary, findings.Summary}, "\n"))
@@ -712,8 +710,7 @@ func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead st
 	park.TestSinceSHA = ""
 	park.TestCommandRan = false
 	park.TestCommandPassed = false
-	park.BaseTestMode = ""
-	park.BaseTestHeadSHA = ""
+	park.TestCommand = ""
 	cause := "This is a budget or provider-slowness cut, not a code failure."
 	if exitCode != 0 || hasBlockingFindings(park.Items) || park.Verdict == types.TestVerdictNoGo || park.Verdict == types.TestVerdictInconclusive {
 		cause = "The cut does not clear the findings reported alongside it."
