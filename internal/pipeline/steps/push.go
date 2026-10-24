@@ -162,6 +162,9 @@ func configuredTestStateForHead(sctx *pipeline.StepContext, headSHA string) (con
 			}
 			state.fullSatisfiedOnHead = state.fullSatisfiedOnHead || findings.TestMode == "full" && findings.TestCommandRan && findings.TestedHeadSHA == headSHA
 		}
+		if step.Status == types.StepStatusSkipped && ((!state.ranOnHead && state.lastTestedHead != "") || (state.hadDelta && !state.fullSatisfiedOnHead)) {
+			return state, fmt.Errorf("cannot validate final head %s: configured Test step is skipped; required validation cannot be restarted", headSHA)
+		}
 		return state, nil
 	}
 	return state, nil

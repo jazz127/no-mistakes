@@ -411,6 +411,72 @@ func TestFinalFullTestGateHonorsApprovedFailureOnlyOnItsHead(t *testing.T) {
 	}
 }
 
+func TestPushStepRefusesRestartWhenPersistedTestIsSkipped(t *testing.T) {
+	for _, validation := range []string{"delta on a new head", "final full after delta"} {
+		t.Run(validation, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "exit 7"})
+			sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failed := types.Findings{TestMode: "full", TestedHeadSHA: baseSHA, TestCommandRan: true}
+			if validation == "final full after delta" {
+				recordTestModeRound(t, sctx, sr.ID, types.Findings{TestMode: "delta", TestedHeadSHA: headSHA, TestSinceSHA: baseSHA, TestCommandRan: true, TestCommandPassed: true})
+				failed.TestedHeadSHA = headSHA
+			}
+			recordTestModeRound(t, sctx, sr.ID, failed)
+			raw, err := json.Marshal(failed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sctx.DB.ParkStepForApproval(sctx.Run.ID, sr.ID, types.StepStatusAwaitingApproval, 7, 1, testStringPtr(string(raw))); err != nil {
+				t.Fatal(err)
+			}
+			if err := sctx.DB.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 7, 1, "test.log"); err != nil {
+				t.Fatal(err)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				outcome, err := (&PushStep{}).Execute(sctx)
+				if err == nil || !strings.Contains(err.Error(), "Test step is skipped") || !strings.Contains(err.Error(), "required validation cannot be restarted") || !strings.Contains(err.Error(), headSHA) {
+					t.Fatalf("Push must explain the unsatisfiable Test requirement: outcome=%+v error=%v", outcome, err)
+				}
+				if outcome != nil {
+					t.Fatalf("skipped Test must fail rather than request another restart: %+v", outcome)
+				}
+				if err := sctx.DB.ResetStepsFrom(sctx.Run.ID, types.StepTest.Order()); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestConfiguredTestSkipWithoutOutstandingValidationDoesNotFail(t *testing.T) {
+	for _, history := range []string{"no command history", "full pass on final head", "full pass after delta"} {
+		t.Run(history, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+			sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if history == "full pass after delta" {
+				recordTestModeRound(t, sctx, sr.ID, types.Findings{TestMode: "delta", TestedHeadSHA: headSHA, TestSinceSHA: baseSHA, TestCommandRan: true, TestCommandPassed: true})
+			}
+			if history != "no command history" {
+				recordTestModeRound(t, sctx, sr.ID, types.Findings{TestMode: "full", TestedHeadSHA: headSHA, TestCommandRan: true, TestCommandPassed: true})
+			}
+			if err := sctx.DB.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 1, "test.log"); err != nil {
+				t.Fatal(err)
+			}
+			if required, err := finalFullTestRequired(sctx, headSHA); err != nil || required {
+				t.Fatalf("skip introduced an unnecessary validation requirement: required=%t error=%v", required, err)
+			}
+		})
+	}
+}
+
 func recordTestModeRound(t *testing.T, sctx *pipeline.StepContext, stepID string, findings types.Findings) {
 	t.Helper()
 	raw, err := json.Marshal(findings)
