@@ -384,6 +384,8 @@ Machine-local [`repository_overrides.commands`](/no-mistakes/reference/global-co
 Whether the baseline passes, fails, or is absent, the agent then derives targeted end-user scenarios and drives the product itself under the same targeted-validation contract.
 A non-zero exit parks the Test step. Approving that gate records an explicit override on the step and on the PR attestation; the [`require-no-mistakes`](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) check treats that as non-compliant unless [`test.allow_approve_over_failure`](#testallow_approve_over_failure) is set.
 
+This command can implement the [full/delta test-selector environment contract](/no-mistakes/reference/environment/#no_mistakes_test_mode). See the [Test step](/no-mistakes/reference/pipeline-steps/#test) for command scheduling, result reuse, final validation, and PR evidence.
+
 ### commands.lint
 
 Explicit lint command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
@@ -1064,7 +1066,7 @@ test:
   base_attribution: true
 ```
 
-When a configured [`commands.test`](#commandstest) exits non-zero, re-runs the same command on the run's base commit (the merge base with the effective PR base branch) and diffs the two results, so failures that already exist on the base are not blamed on the change. The base run uses a disposable clone of that commit outside the run worktree, runs [`commands.prepare`](#commandsprepare) there first when one is configured (its output is logged as `Prepare (base)`, and its tracked and ordinary untracked changes are reset before the base suite runs, exactly as on the head, so only ignored materialization survives), and logs its output to the Test step log as `Test (base)`. Base preparation and the base command share one deadline, the Test budget [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout) (default 30 minutes); a base run that outlives it is stopped and reported as unavailable while the head's failure still parks. Both base commands keep the machine-local [`nice`](/no-mistakes/reference/global-config/#machine-local-commands) settings for `prepare` and `test`. Only the repository command's own output is attributed: machine-local `additional` test checks are never re-run on the base, and a failure in one of them alone triggers no base run.
+When a configured [`commands.test`](#commandstest) exits non-zero, re-runs the same command in [full mode](/no-mistakes/reference/environment/#no_mistakes_test_mode) on the run's base commit (the merge base with the effective PR base branch), even if the head run used delta mode, and diffs the two results, so failures that already exist on the base are not blamed on the change. The base run uses a disposable clone of that commit outside the run worktree, runs [`commands.prepare`](#commandsprepare) there first when one is configured (its output is logged as `Prepare (base)`, and its tracked and ordinary untracked changes are reset before the base suite runs, exactly as on the head, so only ignored materialization survives), and logs its output to the Test step log as `Test (base)`. Base preparation and the base command share one deadline, the Test budget [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout) (default 30 minutes); a base run that outlives it is stopped and reported as unavailable while the head's failure still parks. Both base commands keep the machine-local [`nice`](/no-mistakes/reference/global-config/#machine-local-commands) settings for `prepare` and `test`. Only the repository command's own output is attributed: machine-local `additional` test checks are never re-run on the base, and a failure in one of them alone triggers no base run.
 
 The attribution leads the Test findings summary (the failure output the PR and repair turns see) and is passed to the evidence agent:
 
@@ -1096,6 +1098,8 @@ Recorded reason that opts this repository into letting the `PR must be raised vi
 | Default | Empty (off) |
 
 Off by default. When a Test step is approved while `commands.test` exited non-zero, no-mistakes records that as an override on the step and copies it onto the PR attestation as `steps[].override_reason`. The required check then refuses that attestation unless this field is a non-empty reason, which is copied into the attestation as `allow_test_command_override`.
+
+This setting controls attestation acceptance; it does not waive the [Test step's final-head full-pass requirement](/no-mistakes/reference/pipeline-steps/#test).
 
 Like `no_ci`, this field weakens a merge gate, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`. A contributor's pushed branch cannot waive the configured-test check that certifies it. The string is the recorded reason; whitespace-only is treated as unset.
 

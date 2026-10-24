@@ -188,7 +188,8 @@ func runTestCommandOnBase(sctx *pipeline.StepContext, testCmd, baseSHA string) (
 			return "", 0, fmt.Errorf("clean base preparation changes: %w", err)
 		}
 	}
-	output, exitCode, err := runShellCommandWithPriority(ctx, checkout, env, testCmd, sctx.Config.CommandOverrides["test"].Nice)
+	sctx.Log("configured test command mode: full (base attribution)")
+	output, exitCode, err := runShellCommandWithPriority(ctx, checkout, testCommandEnvironment(sctx, "full", ""), testCmd, sctx.Config.CommandOverrides["test"].Nice)
 	if err := exceeded(); err != nil {
 		return "", 0, err
 	}
