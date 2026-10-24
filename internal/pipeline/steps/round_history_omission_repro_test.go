@@ -13,6 +13,7 @@ import (
 // see the user both fixing and ignoring one finding, and the ignore guidance
 // tells them not to keep code changed to satisfy it.
 func TestRoundHistory_OmittedCarriedFindingIsNotRecordedAsIgnored(t *testing.T) {
+	t.Parallel()
 	sctx, stepID := newRoundHistoryContext(t)
 
 	// Round 1: one ask-user and one auto-fix finding; the user fixes both.
@@ -59,6 +60,7 @@ func TestRoundHistory_OmittedCarriedFindingIsNotRecordedAsIgnored(t *testing.T) 
 }
 
 func TestRoundHistory_ReusedIDDeclineSurvivesEarlierSelection(t *testing.T) {
+	t.Parallel()
 	sctx, stepID := newRoundHistoryContext(t)
 	for i, description := range []string{"old defect", "new defect"} {
 		raw := `{"findings":[{"id":"R1","description":"` + description + `"}]}`
@@ -87,6 +89,7 @@ func TestRoundHistory_ReusedIDDeclineSurvivesEarlierSelection(t *testing.T) {
 }
 
 func TestRoundHistory_BranchWindowKeepsPredecessorSelection(t *testing.T) {
+	t.Parallel()
 	f := newDecisionFixture(t)
 	raw := `{"findings":[{"id":"R1","description":"authorized repair"}]}`
 	for i := 1; i <= db.MaxBranchDecisionRounds+1; i++ {

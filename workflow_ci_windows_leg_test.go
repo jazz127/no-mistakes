@@ -298,8 +298,19 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	if stepsCommand.name == "" {
 		t.Fatal("Windows tests must run ./internal/pipeline/steps/... on its own shard")
 	}
+	// The expanded steps suite exhausted 15m on Windows while healthy tests
+	// were still queued (run 37423837514). Keep completion headroom without
+	// losing the earlier assertion that Go times out before the job does.
+	if timeout := goTestTimeout(t, stepsCommand); timeout < 20*time.Minute {
+		t.Fatalf("Windows steps timeout = %s, want at least 20m so the expanded suite can finish", timeout)
+	}
 	if gitCommand.name == "" {
 		t.Fatal("Windows tests must keep a git-heavy remainder shard besides pipeline/steps")
+	}
+	// Run 39086105508 exhausted 15m in branchsync with healthy tests still
+	// queued. The git shard needs the same completion headroom as steps.
+	if timeout := goTestTimeout(t, gitCommand); timeout < 20*time.Minute {
+		t.Fatalf("Windows git timeout = %s, want at least 20m so the suite can finish", timeout)
 	}
 	if overlap := packagesOverlap(stepsFromArgs, gitFromArgs); len(overlap) > 0 {
 		t.Fatalf("git and steps shards must not overlap, also ran %v", overlap)

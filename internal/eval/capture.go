@@ -118,12 +118,22 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 		return nil, err
 	}
 
-	run, err := database.GetRun(strings.TrimSpace(runID))
+	run, reviewRounds, reviewStep, err := loadReviewRounds(database, runID)
 	if err != nil {
-		return nil, fmt.Errorf("read source run: %w", err)
+		return nil, err
 	}
 	if run == nil {
 		return nil, fmt.Errorf("run %q not found", runID)
+	}
+	if reviewStep == nil || len(reviewRounds) == 0 {
+		return nil, fmt.Errorf("%w: run %q has no review passes", ErrNoCapturableReview, run.ID)
+	}
+	prState := runPRState(run)
+	if run.ID != reviewStep.RunID {
+		run, err = database.GetRun(reviewStep.RunID)
+		if err != nil || run == nil {
+			return nil, fmt.Errorf("read the run that executed the carried review: %v", err)
+		}
 	}
 	repo, err := database.GetRepo(run.RepoID)
 	if err != nil {
@@ -136,29 +146,15 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 	if err != nil {
 		return nil, fmt.Errorf("read source steps: %w", err)
 	}
-	var reviewStep *db.StepResult
 	allRounds := make([]sourceRound, 0)
 	for _, step := range steps {
-		rounds, err := database.GetRoundsByStep(step.ID)
+		rounds, err := database.GetRoundsByStep(step.RoundsStepID())
 		if err != nil {
 			return nil, fmt.Errorf("read source rounds: %w", err)
 		}
 		for _, round := range rounds {
 			allRounds = append(allRounds, portableRound(round, step.StepName))
 		}
-		if step.StepName == types.StepReview {
-			reviewStep = step
-		}
-	}
-	if reviewStep == nil {
-		return nil, fmt.Errorf("%w: run %q has no review step", ErrNoCapturableReview, run.ID)
-	}
-	reviewRounds, err := database.GetRoundsByStep(reviewStep.ID)
-	if err != nil {
-		return nil, fmt.Errorf("read review rounds: %w", err)
-	}
-	if len(reviewRounds) == 0 {
-		return nil, fmt.Errorf("%w: run %q recorded no review passes", ErrNoCapturableReview, run.ID)
 	}
 
 	gateDir := p.RepoDir(repo.ID)
@@ -178,7 +174,7 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 			continue
 		}
 		decision := decisionForRound(round, reviewStep)
-		labels := goldFromRound(round, decision, runPRState(run))
+		labels := goldFromRound(round, decision, prState)
 		if !labels.HasGold() && (reviewStep.Status == types.StepStatusAwaitingApproval || reviewStep.Status == types.StepStatusFixReview) {
 			return nil, fmt.Errorf("%w: review round %q has no recorded gate decision", ErrNoCapturableReview, round.ID)
 		}
@@ -223,7 +219,7 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 		caseID := run.ID + "-" + round.ID
 		caseDir := store.caseDir(caseID)
 		if existing, err := os.Stat(caseDir); err == nil && existing.IsDir() {
-			c, err := relabelExistingCase(store, caseDir, round, decision, runPRState(run))
+			c, err := relabelExistingCase(store, caseDir, round, decision, prState)
 			if err != nil {
 				return nil, fmt.Errorf("relabel existing case %q: %w", caseID, err)
 			}
@@ -745,7 +741,7 @@ func relabelRunLocked(store *Store, database *db.DB, runID string) ([]Case, erro
 	if run == nil || len(reviewRounds) == 0 {
 		return nil, nil
 	}
-	existing, err := store.casesForRun(run.ID)
+	existing, err := store.casesForRun(reviewStep.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -792,7 +788,39 @@ func loadReviewRounds(database *db.DB, runID string) (*db.Run, []*db.StepRound, 
 	if reviewStep == nil {
 		return run, nil, nil, nil
 	}
-	rounds, err := database.GetRoundsByStep(reviewStep.ID)
+	if reviewStep.RoundsStepID() != reviewStep.ID {
+		reviewStep, err = database.GetStepResult(reviewStep.RoundsStepID())
+		if err != nil || reviewStep == nil {
+			return nil, nil, nil, fmt.Errorf("read the step that executed the carried review: %v", err)
+		}
+	}
+	for {
+		link, err := database.GetRunRetryBySource(run.ID)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if link == nil {
+			break
+		}
+		steps, err := database.GetStepsByRun(link.RunID)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		carried := false
+		for _, step := range steps {
+			if step.StepName == types.StepReview && step.RoundsStepID() == reviewStep.ID {
+				carried = true
+			}
+		}
+		if !carried {
+			break
+		}
+		run, err = database.GetRun(link.RunID)
+		if err != nil || run == nil {
+			return nil, nil, nil, fmt.Errorf("read the run carrying the review: %v", err)
+		}
+	}
+	rounds, err := database.GetRoundsByStep(reviewStep.RoundsStepID())
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("read review rounds: %w", err)
 	}

@@ -45,6 +45,15 @@ func newOpencodeMessageFailure(e *opencodeMessageError, toolActivity bool) error
 
 func (e *opencodeMessageFailure) StructuredOutputRejected() bool { return e.structured }
 
+func (e *opencodeMessageFailure) TerminalProviderError() bool { return e.terminal }
+
+func (e *opencodeMessageFailure) Unwrap() error {
+	if e.toolActivity {
+		return errOpencodeToolsAlreadyRan
+	}
+	return nil
+}
+
 func (e *opencodeMessageFailure) Error() string {
 	// StructuredOutputError keeps its own wording: the actionable fact is
 	// that opencode already spent its internal retries trying to make the
@@ -118,7 +127,7 @@ func classifyOpencodeTransient(err error) (string, bool) {
 	// classifier with no verdict from opencode, and that classifier reads
 	// only text. The marker is the one place the tool evidence survives, so
 	// it is checked before the fall-through rather than at each call site.
-	if opencodeReplayUnsafe(err) {
+	if IsReplayUnsafeError(err) {
 		return "", false
 	}
 	return classifyTransient(err)
@@ -188,10 +197,10 @@ func (e opencodeToolEvidence) marker() error {
 	return errOpencodeToolActivityUnknown
 }
 
-// opencodeReplayUnsafe reports whether err belongs to a turn that must not be
+// IsReplayUnsafeError reports whether err belongs to a turn that must not be
 // replayed in a fresh session: it ran a tool, or nothing available proves it
 // did not.
-func opencodeReplayUnsafe(err error) bool {
+func IsReplayUnsafeError(err error) bool {
 	return errors.Is(err, errOpencodeToolsAlreadyRan) || errors.Is(err, errOpencodeToolActivityUnknown)
 }
 

@@ -73,7 +73,7 @@ func TestTestStep_VerifyApprovalOverride_PassingCommandLeavesNoMark(t *testing.T
   "tested": ["npm run e2e -- checkout"],
   "testing_summary": "drove checkout",
   "artifacts": [],
-  "scenarios": [{"name":"user reaches the success screen","result":"fail","live":true,"evidence":"checkout.png","reason":""}],
+  "scenarios": [{"name":"user reaches the success screen","result":"fail","live":true,"surface":"product","evidence":"checkout.png","reason":""}],
   "verdict": "no-go"
 }`)}, nil
 	}}

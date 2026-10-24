@@ -99,6 +99,7 @@ func reviewConversationScenario(t *testing.T) string {
         - name: "fakeagent: simulated end-to-end scenario"
           result: pass
           live: true
+          surface: product
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go
@@ -389,6 +390,7 @@ func evidenceBranchConversationScenario(t *testing.T) string {
         - name: "fakeagent: simulated end-to-end scenario"
           result: pass
           live: true
+          surface: product
           evidence: "run-transcript.txt"
           reason: ""
       verdict: go
@@ -409,6 +411,7 @@ func evidenceBranchConversationScenario(t *testing.T) string {
         - name: "fakeagent: simulated end-to-end scenario"
           result: pass
           live: true
+          surface: product
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go
@@ -746,6 +749,7 @@ func unreadableQuestionHistoryScenario(t *testing.T) string {
         - name: "fakeagent: simulated end-to-end scenario"
           result: pass
           live: true
+          surface: product
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go
@@ -1005,6 +1009,7 @@ func reviewFixRoundRetractionScenario(t *testing.T) string {
         - name: "fakeagent: simulated end-to-end scenario"
           result: pass
           live: true
+          surface: product
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go

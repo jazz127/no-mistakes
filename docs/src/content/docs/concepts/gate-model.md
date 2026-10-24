@@ -64,8 +64,7 @@ That is a core design choice, not an implementation detail.
    While a step is actively running or fixing, AXI run objects can also show `active_steps` with the active duration, latest activity, native agent PID, and current execution or fix round.
 8. After local checks pass, the push step forwards the branch to the configured push target only after verifying that the update will not discard unincorporated commits already on that target, and the PR step creates or updates the pull request.
    For GitHub fork routing, the push target is the fork and the PR base repository is the parent from `origin`.
-9. The CI step keeps watching the open PR until it is merged, closed, or its configured idle timeout elapses with no base-branch movement, and can auto-fix failures or merge conflicts when supported.
-   While it watches, the TUI and terminal title surface a `Checks passed` signal once checks are green and the PR is mergeable (or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) and no checks are registered), and `no-mistakes axi` returns `outcome: checks-passed` with instructions to summarize the run and list any pipeline fixes, so agents stop and ask you to review and merge it. An empty forge response without that declaration stays not-ready.
+9. The CI step keeps watching the open PR until it is merged, closed, or its configured idle timeout elapses with no base-branch movement, and can auto-fix failures or merge conflicts when supported. While it watches, the TUI and terminal title surface a `Checks passed` signal once checks are green and the PR is mergeable (or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) and no checks are registered), and `no-mistakes axi` returns `outcome: checks-passed` with instructions to summarize the run and list any pipeline fixes, so agents stop and ask you to review and merge it. An empty forge response without that declaration stays not-ready. Under [`ci.release_after_checks_pass`](/no-mistakes/reference/repo-config/#cirelease_after_checks_pass) the step instead records readiness and finishes at that verdict, so the run completes as `checks_passed`, releases its worktree, and leaves the merge decision - and any later observation of it - to you.
 
 **Key design decisions:**
 
@@ -96,13 +95,30 @@ work unchanged.
 ### Private mirror reconciliation
 
 A rebase can leave the gate branch on an older history that rejects the next
-ordinary push. Reconciliation compares exact commit heads and per-file
-`git patch-id --stable` identities; commit messages are not evidence. Historical
-patch matches also require a clean three-way merge of the private head into the
-live head whose resulting tree equals the live tree. This prevents changes
-discarded by a merge or revert from being counted as surviving content. If that
-survival check cannot prove preservation, the private-only range is reported
-as at risk.
+ordinary push. Reconciliation compares exact commit heads and final-tree
+survival; commit messages and per-commit patch identities are not evidence. A
+clean three-way merge of the private head into the live head whose resulting
+tree equals the live tree proves every private commit contained, so a rebased
+copy whose patch ID changed only because the new base edited nearby context
+lines is not at risk, while changes discarded by a merge or revert are never
+counted as surviving content.
+
+A rebased branch whose later commits edit the lines the private commits wrote
+(for example a new run on a branch an earlier run already published) makes that
+merge conflict although nothing was dropped. Survival is then proven in two
+halves instead: merging with every conflicting hunk resolved toward the live
+head must still leave the live tree unchanged, so a private hunk that merges
+cleanly - content the live head reverted or never had - still refuses; and a
+commit on the live head's first-parent history touching the private paths must
+pass the clean-merge check, placing all of the private content in the live
+history. A side branch discarded by a merge never serves as that point. Both
+halves prove the whole private head, so a rebased copy whose patch ID drifted
+with context and whose lines a later live commit edited is not at risk either.
+At most 64 first-parent candidates are tried; past that bound the proof fails
+closed.
+
+If survival cannot be proven, the whole private-only range is reported as at
+risk.
 
 **Recovery-anchor preservation credit (issue #1233):** a private-only commit
 that a `refs/no-mistakes/recover/<run>` anchor reaches is *preserved*, so it is
@@ -115,8 +131,8 @@ the sanctioned `sync --recover` -> rerun -> push loop cannot deadlock against
 the very anchor that loop wrote to declare the work preserved.
 
 This is a **preservation credit, not containment evidence**. It says nothing
-about whether the content lands in the published tree; ancestry, patch
-identity and final-tree survival remain the only proofs of that, and Decision
+about whether the content lands in the published tree; ancestry and
+final-tree survival remain the only proofs of that, and Decision
 41-A below remains the only head exception. The archive-before-delete contract
 is unchanged, so a credited reconciliation still archives the exact private
 head before removing the branch ref. A commit no anchor reaches is still
@@ -137,7 +153,7 @@ deadlock the credit exists to end.
 
 **Accepted Decision 41-A (issue #983):** pipeline publication may replace a
 private mirror head that is **exactly equal to a head the publishing run itself
-placed on the mirror** without patch-ID or tree-survival proof: its
+placed on the mirror** without tree-survival proof: its
 `Run.SubmittedHeadSHA`, or, once it has published, its durable
 `Run.LastPushedSHA`. The last pushed head is recorded only after a verified push to the configured
 push target and mirror settlement, so it is never an external or newer head.

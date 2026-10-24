@@ -54,6 +54,10 @@ func TestTestStep_PromptDerivesScenariosAndMarksLive(t *testing.T) {
 		"a live UI check silently becomes a fake",
 		`Mark a scenario "live": true ONLY when you drove it against the real product in this run`,
 		"A unit test, a stub, a mock, a recorded fixture, or reading the code is NOT live",
+		`"surface": "product"`,
+		`"simulated" for any fake, stub, mock, fixture, recorded/synthetic response, or offline substitute`,
+		"A built CLI calling fake gh is simulated",
+		"Simulated checks cannot establish a",
 		// The agent owns workarounds to get each scenario live, and whatever
 		// it builds for that stays disposable and isolated.
 		"Getting every scenario live is your responsibility",
@@ -102,7 +106,12 @@ func TestTestStep_PromptDerivesScenariosAndMarksLive(t *testing.T) {
 		Properties struct {
 			Scenarios struct {
 				Items struct {
+					Required   []string `json:"required"`
 					Properties struct {
+						Surface struct {
+							Enum        []string `json:"enum"`
+							Description string   `json:"description"`
+						} `json:"surface"`
 						Reason struct {
 							Description string `json:"description"`
 						} `json:"reason"`
@@ -113,6 +122,13 @@ func TestTestStep_PromptDerivesScenariosAndMarksLive(t *testing.T) {
 	}
 	if err := json.Unmarshal(ag.calls[0].JSONSchema, &schema); err != nil {
 		t.Fatalf("decode delivered evidence schema: %v", err)
+	}
+	item := schema.Properties.Scenarios.Items
+	if strings.Join(item.Properties.Surface.Enum, ",") != "product,simulated,none" || !strings.Contains(strings.Join(item.Required, ","), "surface") {
+		t.Fatalf("delivered schema lacks required surface classification: %+v", item)
+	}
+	if !strings.Contains(item.Properties.Surface.Description, "an upstream service") {
+		t.Fatalf("schema does not classify upstream substitutes: %+v", item)
 	}
 	reason := schema.Properties.Scenarios.Items.Properties.Reason.Description
 	for _, want := range []string{
@@ -206,7 +222,7 @@ const passingScenarioFindingsJSON = `{
   "tested": ["npm run e2e -- checkout"],
   "testing_summary": "drove checkout end to end",
   "artifacts": [],
-  "scenarios": [{"name":"user reaches the success screen","result":"pass","live":true,"evidence":"checkout.png","reason":""}],
+  "scenarios": [{"name":"user reaches the success screen","result":"pass","live":true,"surface":"product","evidence":"checkout.png","reason":""}],
   "verdict": "go"
 }`
 
@@ -235,8 +251,8 @@ func TestTestStep_VerdictPolicy(t *testing.T) {
 			name: "untested is listed without parking",
 			output: `{"findings":[],"summary":"","tested":["manual check"],"testing_summary":"partly driven","artifacts":[],
 				"scenarios":[
-					{"name":"user reaches the success screen","result":"pass","live":true,"evidence":"checkout.png","reason":""},
-					{"name":"payment declines are shown","result":"untested","live":false,"evidence":"","reason":"no card sandbox credential on this machine"}
+					{"name":"user reaches the success screen","result":"pass","live":true,"surface":"product","evidence":"checkout.png","reason":""},
+					{"name":"payment declines are shown","result":"untested","live":false,"surface":"none","evidence":"","reason":"no card sandbox credential on this machine"}
 				],"verdict":"go"}`,
 			wantApproval:      false,
 			wantScenarioCount: 2,
@@ -244,7 +260,7 @@ func TestTestStep_VerdictPolicy(t *testing.T) {
 		{
 			name: "no-go parks",
 			output: `{"findings":[],"summary":"","tested":["npm run e2e -- checkout"],"testing_summary":"checkout broke","artifacts":[],
-				"scenarios":[{"name":"user reaches the success screen","result":"fail","live":true,"evidence":"checkout.png","reason":""}],
+				"scenarios":[{"name":"user reaches the success screen","result":"fail","live":true,"surface":"product","evidence":"checkout.png","reason":""}],
 				"verdict":"no-go"}`,
 			wantApproval:      true,
 			wantDescription:   "live validation verdict: no-go",
@@ -254,7 +270,7 @@ func TestTestStep_VerdictPolicy(t *testing.T) {
 		{
 			name: "inconclusive parks for a human",
 			output: `{"findings":[],"summary":"","tested":["read the diff"],"testing_summary":"nothing could be driven","artifacts":[],
-				"scenarios":[{"name":"user reaches the success screen","result":"untested","live":false,"evidence":"","reason":"no browser on this machine"}],
+				"scenarios":[{"name":"user reaches the success screen","result":"untested","live":false,"surface":"none","evidence":"","reason":"no browser on this machine"}],
 				"verdict":"inconclusive"}`,
 			wantApproval:      true,
 			wantDescription:   "live validation verdict: inconclusive",
@@ -264,7 +280,7 @@ func TestTestStep_VerdictPolicy(t *testing.T) {
 		{
 			name: "no-surface parks as ask-user",
 			output: `{"findings":[],"summary":"","tested":["inspected .github/workflows/ci.yml"],"testing_summary":"CI workflow has no running product to drive","artifacts":[],
-				"scenarios":[{"name":"Windows git-heavy shard runs the git-backed packages","result":"untested","live":false,"evidence":"","reason":"CI workflow YAML has no running product no-mistakes can drive"}],
+				"scenarios":[{"name":"Windows git-heavy shard runs the git-backed packages","result":"untested","live":false,"surface":"none","evidence":"","reason":"CI workflow YAML has no running product no-mistakes can drive"}],
 				"verdict":"no-surface"}`,
 			wantApproval:      true,
 			wantDescription:   "this change has no live-validatable surface; proceed without live validation?",
@@ -349,22 +365,22 @@ func TestTestStep_MissingScenarioContractFails(t *testing.T) {
 		},
 		{
 			name:    "no verdict",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":true,"evidence":"ok","reason":""}]}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":true,"surface":"product","evidence":"ok","reason":""}]}`,
 			wantErr: "missing verdict",
 		},
 		{
 			name:    "verdict outside the vocabulary",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":true,"evidence":"ok","reason":""}],"verdict":"probably fine"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":true,"surface":"product","evidence":"ok","reason":""}],"verdict":"probably fine"}`,
 			wantErr: "is not one of",
 		},
 		{
 			name:    "scenario result outside the vocabulary",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"maybe","live":true,"evidence":"ok","reason":""}],"verdict":"go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"maybe","live":true,"surface":"product","evidence":"ok","reason":""}],"verdict":"go"}`,
 			wantErr: "is not one of",
 		},
 		{
 			name:    "unnamed scenario",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"  ","result":"pass","live":true,"evidence":"ok","reason":""}],"verdict":"go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"  ","result":"pass","live":true,"surface":"product","evidence":"ok","reason":""}],"verdict":"go"}`,
 			wantErr: "missing name",
 		},
 		{
@@ -374,52 +390,52 @@ func TestTestStep_MissingScenarioContractFails(t *testing.T) {
 		},
 		{
 			name:    "pass must be live",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":false,"evidence":"ok","reason":""}],"verdict":"go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":false,"surface":"none","evidence":"ok","reason":""}],"verdict":"go"}`,
 			wantErr: `result "pass" but live=false`,
 		},
 		{
 			name:    "pass requires evidence",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":true,"evidence":"  ","reason":""}],"verdict":"go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":true,"surface":"product","evidence":"  ","reason":""}],"verdict":"go"}`,
 			wantErr: "missing evidence",
 		},
 		{
 			name:    "fail requires evidence",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"fail","live":true,"evidence":"","reason":""}],"verdict":"no-go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"fail","live":true,"surface":"product","evidence":"","reason":""}],"verdict":"no-go"}`,
 			wantErr: "missing evidence",
 		},
 		{
 			name:    "untested cannot be live",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"untested","live":true,"evidence":"","reason":"no browser"}],"verdict":"inconclusive"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"untested","live":true,"surface":"product","evidence":"","reason":"no browser"}],"verdict":"inconclusive"}`,
 			wantErr: `result "untested" but live=true`,
 		},
 		{
 			name:    "untested without a reason",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"untested","live":false,"evidence":"","reason":""}],"verdict":"inconclusive"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"untested","live":false,"surface":"none","evidence":"","reason":""}],"verdict":"inconclusive"}`,
 			wantErr: `result "untested" without a reason`,
 		},
 		{
 			name:    "go cannot override failure",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"fail","live":true,"evidence":"failure","reason":""}],"verdict":"go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"fail","live":true,"surface":"product","evidence":"failure","reason":""}],"verdict":"go"}`,
 			wantErr: `verdict "go" contradicts failed scenario`,
 		},
 		{
 			name:    "inconclusive cannot override failure",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"fail","live":true,"evidence":"failure","reason":""}],"verdict":"inconclusive"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"fail","live":true,"surface":"product","evidence":"failure","reason":""}],"verdict":"inconclusive"}`,
 			wantErr: `verdict "inconclusive" contradicts failed scenario`,
 		},
 		{
 			name:    "no-surface cannot cover a live pass",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":true,"evidence":"ok","reason":""}],"verdict":"no-surface"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":true,"surface":"product","evidence":"ok","reason":""}],"verdict":"no-surface"}`,
 			wantErr: `verdict "no-surface" contradicts live-exercisable scenario`,
 		},
 		{
 			name:    "no-surface cannot cover a claimed pass without live",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":false,"evidence":"ok","reason":""}],"verdict":"no-surface"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":false,"surface":"none","evidence":"ok","reason":""}],"verdict":"no-surface"}`,
 			wantErr: `result "pass" but live=false`,
 		},
 		{
 			name:    "protocol vocabulary is exact",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"Pass","live":true,"evidence":"ok","reason":""}],"verdict":"go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"Pass","live":true,"surface":"product","evidence":"ok","reason":""}],"verdict":"go"}`,
 			wantErr: "is not one of",
 		},
 	} {
@@ -454,7 +470,7 @@ const noSurfaceCIWorkflowFindingsJSON = `{
   "tested": ["inspected .github/workflows/ci.yml"],
   "testing_summary": "CI workflow split has no running product to drive",
   "artifacts": [],
-  "scenarios": [{"name":"Windows git-heavy shard runs the git-backed packages","result":"untested","live":false,"evidence":"","reason":"CI workflow YAML has no running product no-mistakes can drive"}],
+  "scenarios": [{"name":"Windows git-heavy shard runs the git-backed packages","result":"untested","live":false,"surface":"none","evidence":"","reason":"CI workflow YAML has no running product no-mistakes can drive"}],
   "verdict": "no-surface"
 }`
 
@@ -524,8 +540,8 @@ const mixedLivePassAndUntestedFindingsJSON = `{
   "testing_summary": "partly driven",
   "artifacts": [],
   "scenarios": [
-    {"name":"user reaches the success screen","result":"pass","live":true,"evidence":"checkout.png","reason":""},
-    {"name":"payment declines are shown","result":"untested","live":false,"evidence":"","reason":"no card sandbox credential on this machine"}
+    {"name":"user reaches the success screen","result":"pass","live":true,"surface":"product","evidence":"checkout.png","reason":""},
+    {"name":"payment declines are shown","result":"untested","live":false,"surface":"none","evidence":"","reason":"no card sandbox credential on this machine"}
   ],
   "verdict": "go"
 }`
@@ -536,7 +552,7 @@ const passNotLiveFindingsJSON = `{
   "tested": ["adapter stub"],
   "testing_summary": "adapter stubbed the scenario",
   "artifacts": [],
-  "scenarios": [{"name":"adapter handles the request","result":"pass","live":false,"evidence":"stub","reason":""}],
+  "scenarios": [{"name":"adapter handles the request","result":"pass","live":false,"surface":"none","evidence":"stub","reason":""}],
   "verdict": "go"
 }`
 
@@ -546,7 +562,7 @@ const untestedWithoutReasonFindingsJSON = `{
   "tested": ["read the diff"],
   "testing_summary": "could not drive live",
   "artifacts": [],
-  "scenarios": [{"name":"user reaches the success screen","result":"untested","live":false,"evidence":"","reason":""}],
+  "scenarios": [{"name":"user reaches the success screen","result":"untested","live":false,"surface":"none","evidence":"","reason":""}],
   "verdict": "inconclusive"
 }`
 
@@ -784,4 +800,85 @@ func commitCIWorkflowOnlyChange(t *testing.T, dir, baseSHA string) string {
 	gitCmd(t, dir, "add", "-A")
 	gitCmd(t, dir, "commit", "-m", "split windows git shard")
 	return gitCmd(t, dir, "rev-parse", "HEAD")
+}
+
+// The evidence agent's built CLI ran, but fake gh replaced its upstream.
+// The correction stays an accounting turn, and the accepted verdict must park.
+func TestTestStep_SimulatedUpstreamCannotEstablishGo(t *testing.T) {
+	t.Parallel()
+	invalid := simulatedGHFindingsJSON(t)
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(invalid), &payload); err != nil {
+		t.Fatal(err)
+	}
+	scenarios := payload["scenarios"].([]any)
+	for _, raw := range scenarios[:9] {
+		scenario := raw.(map[string]any)
+		scenario["live"] = false
+		scenario["result"] = "untested"
+		scenario["reason"] = "offline fake gh replaced GitHub; account merge/update not exercised"
+	}
+	corrected, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		calls++
+		if calls == 1 {
+			return &agent.Result{Output: json.RawMessage(invalid)}, nil
+		}
+		return &agent.Result{Output: corrected}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || !outcome.NeedsApproval {
+		t.Fatalf("calls=%d outcome=%+v, want correction then parked verdict", calls, outcome)
+	}
+	for _, want := range []string{`surface "simulated" cannot establish a live pass/fail`, `scenario 9:`, `This is a correction-only turn`, `Never relabel a simulated surface as product`, `Do not use tools`} {
+		if !strings.Contains(ag.calls[1].Prompt, want) {
+			t.Errorf("correction prompt missing %q", want)
+		}
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, total := types.LiveScenarioCounts(findings.Scenarios)
+	if findings.Verdict != types.TestVerdictInconclusive || live != 1 || total != 10 {
+		t.Fatalf("findings=%+v counts=%d/%d", findings, live, total)
+	}
+	if len(findings.Items) != 1 || findings.Items[0].Action != types.ActionAskUser {
+		t.Fatalf("verdict finding=%+v", findings.Items)
+	}
+	for _, scenario := range findings.Scenarios[:9] {
+		if scenario.Live || scenario.Result != types.ScenarioResultUntested || scenario.Surface != types.ScenarioSurfaceSimulated {
+			t.Fatalf("simulated scenario=%+v", scenario)
+		}
+	}
+}
+
+func TestRequiredTestFindings_RequiresSurfaceProvenance(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, replacement, wantErr string }{
+		{"omitted", "", "missing surface"},
+		{"null", `"surface":null,`, "missing surface"},
+		{"unknown", `"surface":"unknown",`, "unknown surface"},
+		{"wrong case", `"surface":"Product",`, "unknown surface"},
+		{"simulated live", `"surface":"simulated",`, `surface "simulated" cannot establish a live pass/fail`},
+		{"no execution live", `"surface":"none",`, `surface "none" cannot establish a live pass/fail`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := strings.Replace(passingScenarioFindingsJSON, `"surface":"product",`, tc.replacement, 1)
+			var findings Findings
+			err := unmarshalRequiredTestFindings([]byte(raw), &findings)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error=%v, want %q", err, tc.wantErr)
+			}
+		})
+	}
 }

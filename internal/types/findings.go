@@ -92,13 +92,14 @@ const (
 // Finding category constants for the CI step's check findings. The CI step
 // turns each settled issue on the pull request into one finding and the fix
 // half routes by this category: a check finding names its provider check in
-// Finding.Check, a merge-conflict finding asks for a rebase, a transient
+// Finding.Check, a merge-conflict or behind-base finding asks for a rebase, a transient
 // finding is a provider-attributed outcome no code change can clear, and a
 // review-bot finding carries one unresolved comment from a third-party
 // review bot's check.
 const (
 	FindingCategoryCICheck         = "ci-check"
 	FindingCategoryCIMergeConflict = "ci-merge-conflict"
+	FindingCategoryCIBehindBase    = "ci-behind-base"
 	FindingCategoryCITransient     = "ci-transient"
 	FindingCategoryCIReviewBot     = "ci-review-bot"
 )
@@ -116,6 +117,12 @@ const FindingCategoryReviewQuestion = "review-question"
 // ApprovalOverrideVerifier keys on it so an approval over that failure is
 // recorded as an override rather than a silent green completion.
 const FindingCategoryTestCommand = "test-command"
+
+// FindingCategoryTestVerdict marks the finding the Test step derives from its
+// evidence turn's verdict. A completed evidence turn replaces an earlier
+// verdict finding; a budget-cut park can retain the last completed turn's
+// verdict finding because the cut supplies no new verdict.
+const FindingCategoryTestVerdict = "test-verdict"
 
 // FindingIDTestAgentTimeout is the Test-step park when an evidence or repair
 // invocation burned its wall-clock budget. It is a budget/provider-slowness
@@ -213,7 +220,8 @@ type Finding struct {
 // user intent and the change, and the result of driving it.
 //
 // Live is the whole point of the record: it is true ONLY when the scenario was
-// driven against the real product in this run. A unit test, a stub, a recorded
+// driven against the real product and actual upstream services in this run.
+// Surface records whether either was substituted. A unit test, a stub, a recorded
 // fixture, or reading the code is not live, and a scenario that could not be
 // driven here is reported with Result ScenarioResultUntested plus a Reason
 // explaining the unavailable capability or absence of a live product surface,
@@ -222,8 +230,45 @@ type TestScenario struct {
 	Name     string `json:"name"`
 	Result   string `json:"result"`
 	Live     bool   `json:"live"`
+	Surface  string `json:"surface,omitempty"`
 	Evidence string `json:"evidence"`
 	Reason   string `json:"reason"`
+}
+
+// Surface classifies the whole exercised path, including the product's upstream
+// services. Disposable data and a running product instance are fine; replacing
+// the product or an upstream with a fake, stub, mock, fixture, recorded/synthetic
+// response, or offline substitute is simulated.
+const (
+	ScenarioSurfaceProduct   = "product"
+	ScenarioSurfaceSimulated = "simulated"
+	ScenarioSurfaceNone      = "none"
+)
+
+func IsKnownScenarioSurface(surface string) bool {
+	return surface == ScenarioSurfaceProduct || surface == ScenarioSurfaceSimulated || surface == ScenarioSurfaceNone
+}
+
+// IsLive requires affirmative surface provenance, not just an agent's boolean.
+// Older records without a surface remain readable but cannot certify live work.
+func (s TestScenario) IsLive() bool {
+	return s.Live && s.Surface == ScenarioSurfaceProduct &&
+		(s.Result == ScenarioResultPass || s.Result == ScenarioResultFail) && strings.TrimSpace(s.Evidence) != ""
+}
+
+// LiveValidationVerdict prevents a go verdict from certifying substituted or
+// unspecified surfaces. A recorded no-go stays no-go; ordinary untested product
+// scenarios keep the existing verdict policy.
+func LiveValidationVerdict(scenarios []TestScenario, verdict string) string {
+	if verdict != TestVerdictGo {
+		return verdict
+	}
+	for _, s := range scenarios {
+		if !IsKnownScenarioSurface(s.Surface) || s.Surface == ScenarioSurfaceSimulated || (s.Live && !s.IsLive()) {
+			return TestVerdictInconclusive
+		}
+	}
+	return verdict
 }
 
 // LiveScenarioCounts returns how many of scenarios were driven live against
@@ -231,7 +276,7 @@ type TestScenario struct {
 func LiveScenarioCounts(scenarios []TestScenario) (live, total int) {
 	for _, s := range scenarios {
 		total++
-		if s.Live {
+		if s.IsLive() {
 			live++
 		}
 	}
@@ -287,6 +332,20 @@ type WithdrawnFinding struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// ReviewCoverageScope is pipeline-written provenance for retained coverage.
+// Agent output never supplies authority for this record.
+type ReviewCoverageScope struct {
+	Version          int      `json:"version"`
+	RunID            string   `json:"run_id"`
+	StepResultID     string   `json:"step_result_id"`
+	HeadSHA          string   `json:"head_sha"`
+	RunBaseSHA       string   `json:"run_base_sha"`
+	BaseSHA          string   `json:"base_sha"`
+	TrustedConfigSHA string   `json:"trusted_config_sha"`
+	Paths            []string `json:"paths"`
+	SourceRoundID    string   `json:"source_round_id,omitempty"`
+}
+
 // Findings is the structured findings payload exchanged across pipeline, IPC, and TUI.
 //
 // Scenarios and Verdict are the test step's live-validation contract. Both are
@@ -302,7 +361,8 @@ type Findings struct {
 	// outstanding set (see pipeline.resolveVerifiedFindingsJSON). A review turn
 	// that does not list a path has not proven anything about it, so silence is
 	// never read as resolution. Empty on every non-review payload.
-	ReviewedPaths []string `json:"reviewed_paths,omitempty"`
+	ReviewedPaths       []string             `json:"reviewed_paths,omitempty"`
+	ReviewCoverageScope *ReviewCoverageScope `json:"review_coverage_scope,omitempty"`
 	// WithdrawnFindings is an answer round's explicit re-adjudication: the
 	// carried findings the reviewer now says no longer hold, each with its
 	// reason. On an answer round a carried finding leaves the outstanding set
@@ -354,6 +414,11 @@ type findingsWire struct {
 	RiskLevel           string             `json:"risk_level"`
 	RiskRationale       string             `json:"risk_rationale"`
 	RiskScope           string             `json:"risk_scope"`
+	reviewCoverageWire
+}
+
+type reviewCoverageWire struct {
+	ReviewCoverageScope *ReviewCoverageScope `json:"review_coverage_scope"`
 }
 
 // ParseFindingsJSON decodes findings JSON, accepting current and legacy item
@@ -371,6 +436,7 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		Items:               items,
 		Summary:             wire.Summary,
 		ReviewedPaths:       wire.ReviewedPaths,
+		ReviewCoverageScope: wire.ReviewCoverageScope,
 		WithdrawnFindings:   wire.WithdrawnFindings,
 		Tested:              wire.Tested,
 		TestingSummary:      wire.TestingSummary,
@@ -406,18 +472,34 @@ func FindingsMetadata(findings Findings) Findings {
 	return findings
 }
 
-// NormalizeFindings assigns deterministic IDs to findings that do not have one
-// yet, and trims the ones they arrive with. Surrounding whitespace is never
-// part of a finding's identity: the gate shows the ID and a response names it,
-// and the response side trims what it is given, so a padded gate ID used to
-// have no spelling that could select or decline it.
+// NormalizeFindings trims IDs and makes them unique within the findings set.
+// The first occurrence of an explicit ID keeps it; missing IDs and later
+// duplicates receive deterministic prefix-N IDs that skip every reserved ID,
+// including explicit IDs later in the set. Selecting one finding must never
+// select or discard an unrelated finding with the same ID.
+// Surrounding whitespace is never part of a finding's identity: the gate shows
+// the ID and a response names it, and the response side trims what it is given,
+// so a padded gate ID used to have no spelling that could select or decline it.
 func NormalizeFindings(findings Findings, prefix string) Findings {
+	used := make(map[string]bool, len(findings.Items))
 	for i := range findings.Items {
 		findings.Items[i].ID = strings.TrimSpace(findings.Items[i].ID)
+		if used[findings.Items[i].ID] {
+			findings.Items[i].ID = ""
+			continue
+		}
+		used[findings.Items[i].ID] = true
+	}
+	for i := range findings.Items {
 		if findings.Items[i].ID != "" {
 			continue
 		}
-		findings.Items[i].ID = prefix + "-" + itoa(i+1)
+		id := prefix + "-" + itoa(i+1)
+		for next := i + 2; used[id]; next++ {
+			id = prefix + "-" + itoa(next)
+		}
+		findings.Items[i].ID = id
+		used[id] = true
 	}
 	return findings
 }

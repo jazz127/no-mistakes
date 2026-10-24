@@ -150,6 +150,7 @@ func unmarshalRequiredTestFindings(raw []byte, findings *Findings) error {
 	if len(issues) > 0 {
 		return fmt.Errorf("%s", strings.Join(issues, "\n"))
 	}
+	findings.Verdict = types.LiveValidationVerdict(findings.Scenarios, findings.Verdict)
 	return nil
 }
 
@@ -157,6 +158,7 @@ type testScenarioContractFields struct {
 	Name     *string `json:"name"`
 	Result   *string `json:"result"`
 	Live     *bool   `json:"live"`
+	Surface  *string `json:"surface"`
 	Evidence *string `json:"evidence"`
 	Reason   *string `json:"reason"`
 }
@@ -175,6 +177,13 @@ func scenarioContractIssues(i int, scenario testScenarioContractFields) []string
 	}
 	if scenario.Live == nil {
 		issues = append(issues, fmt.Sprintf("scenario %d: missing live - set live true only when you drove this against the real product in this run", n))
+	}
+	if scenario.Surface == nil {
+		issues = append(issues, fmt.Sprintf("scenario %d: missing surface - classify the exercised product and upstream path as product, simulated, or none; never infer product from live=true", n))
+	} else if !types.IsKnownScenarioSurface(*scenario.Surface) {
+		issues = append(issues, fmt.Sprintf("scenario %d: unknown surface %q - use product, simulated, or none", n, *scenario.Surface))
+	} else if *scenario.Surface != types.ScenarioSurfaceProduct && (scenario.Live != nil && *scenario.Live || knownResult && *scenario.Result != types.ScenarioResultUntested) {
+		issues = append(issues, fmt.Sprintf("scenario %d: surface %q cannot establish a live pass/fail - set live=false, result untested, and explain the substitute or unavailable surface in reason", n, *scenario.Surface))
 	}
 	if scenario.Evidence == nil {
 		issues = append(issues, fmt.Sprintf("scenario %d: missing evidence", n))
@@ -280,11 +289,12 @@ var testFindingsSchema = json.RawMessage(`{
 				"properties": {
 					"name": {"type": "string", "description": "what an end user does and the observable result that proves it"},
 					"result": {"type": "string", "enum": ["pass", "fail", "untested"]},
-					"live": {"type": "boolean", "description": "true ONLY when this scenario was driven against the real running product in this run; a unit test, stub, recorded fixture, or code reading is not live"},
+					"live": {"type": "boolean", "description": "true ONLY for surface product driven in this run, with no substitute for the product or upstream service"},
+					"surface": {"type": "string", "enum": ["product", "simulated", "none"], "description": "product: running product and actual upstream services; simulated: a fake, stub, mock, fixture, recorded/synthetic response, or offline substitute for either the product or an upstream service, including a fake gh CLI; none: no execution. Disposable data or an isolated running product instance alone is not a substitute. Name the exercised endpoint/driver and any substitutes in evidence or reason."},
 					"evidence": {"type": "string", "description": "the command, artifact label, or evidence file that shows this result"},
 					"reason": {"type": "string", "description": "required for untested: what was tried to drive this scenario live and why live validation is impossible, naming the specific tool, credential, permission, or authority out of reach and how to provide it; under no-surface, why there is no live-validatable surface"}
 				},
-				"required": ["name", "result", "live", "evidence", "reason"]
+				"required": ["name", "result", "live", "surface", "evidence", "reason"]
 			}
 		},
 		"verdict": {

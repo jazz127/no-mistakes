@@ -74,8 +74,8 @@ func attestationPayload(t *testing.T, body string) map[string]any {
 
 func TestRequireActionAcceptsAttestationCarryingLiveValidation(t *testing.T) {
 	body := liveValidatedPipelineBody(t, []types.TestScenario{
-		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"},
-		{Name: "declined payment shows the retry copy", Result: types.ScenarioResultUntested, Reason: "no card sandbox credential"},
+		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Surface: types.ScenarioSurfaceProduct, Evidence: "checkout.png"},
+		{Name: "declined payment shows the retry copy", Result: types.ScenarioResultUntested, Surface: types.ScenarioSurfaceNone, Reason: "no card sandbox credential"},
 	}, types.TestVerdictGo)
 
 	payload := attestationPayload(t, body)
@@ -119,7 +119,7 @@ func TestRequireActionAcceptsAttestationWithoutLiveValidation(t *testing.T) {
 // verdict that reaches it.
 func TestRequireActionDoesNotAdjudicateTheVerdict(t *testing.T) {
 	body := liveValidatedPipelineBody(t, []types.TestScenario{
-		{Name: "user reaches the success screen", Result: types.ScenarioResultFail, Live: true},
+		{Name: "user reaches the success screen", Result: types.ScenarioResultFail, Live: true, Surface: types.ScenarioSurfaceProduct, Evidence: "checkout.png"},
 	}, types.TestVerdictNoGo)
 	result := runRequireAction(t, actionRun{body: body, headSHA: requiredWorkflowTestHeadSHA, number: "1568"})
 	if result.conclusion != "success" {
@@ -129,7 +129,7 @@ func TestRequireActionDoesNotAdjudicateTheVerdict(t *testing.T) {
 
 func TestRequireActionAcceptsAttestationCarryingNoSurface(t *testing.T) {
 	body := liveValidatedPipelineBody(t, []types.TestScenario{
-		{Name: "Windows git-heavy shard runs the git-backed packages", Result: types.ScenarioResultUntested, Reason: "CI workflow YAML has no running product no-mistakes can drive"},
+		{Name: "Windows git-heavy shard runs the git-backed packages", Result: types.ScenarioResultUntested, Surface: types.ScenarioSurfaceNone, Reason: "CI workflow YAML has no running product no-mistakes can drive"},
 	}, types.TestVerdictNoSurface)
 	payload := attestationPayload(t, body)
 	live, ok := payload["live_validation"].(map[string]any)

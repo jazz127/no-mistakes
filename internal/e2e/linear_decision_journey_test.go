@@ -72,6 +72,7 @@ func TestSelectedFixFollowedByDocumentEditDoesNotRestartReview(t *testing.T) {
         - name: "fixture journey"
           result: pass
           live: true
+          surface: product
           evidence: "fixture validation"
           reason: ""
       verdict: go

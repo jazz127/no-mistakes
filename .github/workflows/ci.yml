@@ -4,6 +4,8 @@ on:
   pull_request:
     branches:
       - main
+      - house
+      - 'housefeature/**'
     # Never create a run for a release-please PR. GITHUB_TOKEN-opened PRs land in
     # action_required and never start; excluding the exact release-output set means
     # no run is created at all. push/tag/release triggers are unaffected.
@@ -113,11 +115,15 @@ jobs:
       # ~21 min serial floor.
       - name: Test on Windows (git-heavy)
         if: runner.os == 'Windows' && matrix.shard == 'git'
-        run: go test -v -timeout=15m ./internal/git ./internal/branchsync ./internal/gate ./internal/evidence ./internal/daemon ./internal/eval
+        # branchsync exhausted 15m with healthy tests still queued.
+        # Match steps' completion headroom below the 40m job cap.
+        run: go test -v -timeout=20m ./internal/git ./internal/branchsync ./internal/gate ./internal/evidence ./internal/daemon ./internal/eval
 
       - name: Test on Windows (pipeline/steps)
         if: runner.os == 'Windows' && matrix.shard == 'steps'
-        run: go test -v -timeout=15m ./internal/pipeline/steps/...
+        # The expanded suite exceeded 15m with healthy tests still queued.
+        # Leave completion headroom while staying below the 40m job cap.
+        run: go test -v -timeout=20m ./internal/pipeline/steps/...
 
       - name: Test on Windows (core)
         if: runner.os == 'Windows' && matrix.shard == 'core'

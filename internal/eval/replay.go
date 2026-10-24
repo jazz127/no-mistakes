@@ -489,10 +489,10 @@ type observedAgent struct {
 	ownership  *e2edaemon.Ownership
 	result     *agent.Result
 	durationMS int64
-	// A review can rerun, so usage sums every attempt, fresh input per attempt
-	// as the captured baseline does. usageMissing marks an attempt with no
-	// reported usage, which makes the sum incomplete rather than a smaller
-	// cost.
+	// A review can rerun, so usage sums every attempt. Unlike the captured
+	// pipeline baseline, replay fresh input excludes cache writes as well as
+	// reads. usageMissing marks an attempt with no reported usage, which makes
+	// the sum incomplete rather than a smaller cost.
 	usage            agent.TokenUsage
 	freshInputTokens int
 	usageMissing     bool

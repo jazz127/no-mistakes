@@ -98,3 +98,114 @@ func TestEnsureDirsDoesNotCreateEvidence(t *testing.T) {
 		t.Fatalf("EnsureDirs created the evidence directory (stat err = %v)", err)
 	}
 }
+
+func TestValidateEvidenceRootSeparatesPrivateLogs(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		name := "before directories exist"
+		if existing {
+			name = "existing directories"
+		}
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			p := WithRoot(filepath.Join(base, "nm"))
+			if existing {
+				if err := p.EnsureDirs(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, root := range []string{p.LogsDir(), filepath.Join(p.LogsDir(), "artifacts"), filepath.Join(p.LogsDir(), "..artifacts"), p.Root(), base} {
+				if err := p.ValidateEvidenceRoot(root); err == nil || !strings.Contains(err.Error(), "private logs") {
+					t.Errorf("ValidateEvidenceRoot(%q) = %v, want private-log overlap refusal", root, err)
+				}
+			}
+			for _, root := range []string{"", p.EvidenceDir(), filepath.Join(p.Root(), "logs-public"), filepath.Join(base, "external-evidence")} {
+				if err := p.ValidateEvidenceRoot(root); err != nil {
+					t.Errorf("separate evidence root %q was refused: %v", root, err)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateEvidenceRootRefusesAliasedPrivateLogs(t *testing.T) {
+	base := t.TempDir()
+	p := WithRoot(filepath.Join(base, "nm"))
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(base, "logs-alias")
+	if err := os.Symlink(p.LogsDir(), alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	homeAlias := filepath.Join(base, "home-alias")
+	if err := os.Symlink(p.Root(), homeAlias); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{alias, filepath.Join(alias, "not-created", "artifacts"), homeAlias, filepath.Join(homeAlias, "logs")} {
+		if err := p.ValidateEvidenceRoot(root); err == nil || !strings.Contains(err.Error(), "private logs") {
+			t.Errorf("ValidateEvidenceRoot(%q) = %v, want private-log overlap refusal", root, err)
+		}
+	}
+	if err := WithRoot(homeAlias).ValidateEvidenceRoot(p.LogsDir()); err == nil {
+		t.Fatal("an aliased NM_HOME allowed private logs as evidence")
+	}
+	if err := os.Symlink(p.LogsDir(), p.EvidenceDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ValidateEvidenceRoot(""); err == nil {
+		t.Fatal("default evidence symlinked to private logs was accepted")
+	}
+}
+
+func TestValidateEvidenceRootHonorsFilesystemCaseAliases(t *testing.T) {
+	p := WithRoot(filepath.Join(t.TempDir(), "nm"))
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	variant := filepath.Join(p.Root(), "LOGS")
+	logsInfo, err := os.Stat(p.LogsDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	variantInfo, err := os.Stat(variant)
+	same := err == nil && os.SameFile(logsInfo, variantInfo)
+	for _, root := range []string{variant, filepath.Join(variant, "new-evidence")} {
+		if refused := p.ValidateEvidenceRoot(root) != nil; refused != same {
+			t.Errorf("ValidateEvidenceRoot(%q) refused = %v, filesystem alias = %v", root, refused, same)
+		}
+	}
+}
+
+func TestValidateEvidenceRootRefusesAliasedWorktree(t *testing.T) {
+	p := WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(p.Root(), "worktrees-alias")
+	if err := os.Symlink(p.WorktreesDir(), alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := p.ValidateEvidenceRoot(filepath.Join(alias, "repo", "run")); err == nil {
+		t.Fatal("aliased managed worktree was accepted as evidence")
+	}
+}
+
+func TestValidateEvidenceRootRefusesPrivateLogsAliasedIntoEvidence(t *testing.T) {
+	base := t.TempDir()
+	p := WithRoot(filepath.Join(base, "nm"))
+	public := filepath.Join(base, "public")
+	if err := os.MkdirAll(filepath.Join(public, "private-logs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(p.Root(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(public, "private-logs"), p.LogsDir()); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	for _, root := range []string{public, filepath.Join(public, "private-logs"), filepath.Join(public, "private-logs", "artifacts")} {
+		if err := p.ValidateEvidenceRoot(root); err == nil {
+			t.Errorf("private logs symlinked into evidence root %q were accepted", root)
+		}
+	}
+}

@@ -17,7 +17,6 @@ package worktrees
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -232,26 +231,7 @@ func (l *Layout) Checkouts() []string {
 // repository record. It is the one canonicalization every worktree_roots
 // consumer uses, so a path that matches in one place matches in all of them.
 func Canonical(path string) string {
-	cleaned := filepath.Clean(path)
-	if abs, err := filepath.Abs(cleaned); err == nil {
-		cleaned = abs
-	}
-	// EvalSymlinks fails outright on a path that does not exist yet, and a
-	// configured worktree root usually does not until its first run. Resolve
-	// the deepest existing ancestor and keep the remainder, so a root and the
-	// checkout it belongs to are still compared in the same spelling.
-	current, rest := cleaned, ""
-	for {
-		if resolved, err := filepath.EvalSymlinks(current); err == nil {
-			return filepath.Clean(filepath.Join(resolved, rest))
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return cleaned
-		}
-		rest = filepath.Join(filepath.Base(current), rest)
-		current = parent
-	}
+	return paths.Canonical(path)
 }
 
 // Contains reports whether path is dir itself or sits below it. It is how the
@@ -267,39 +247,5 @@ func Canonical(path string) string {
 // is checked against the filesystem, which is the authority on whether two
 // names are one directory.
 func Contains(dir, path string) bool {
-	return containsBySpelling(dir, path) || containsByIdentity(dir, path)
-}
-
-func containsBySpelling(dir, path string) bool {
-	rel, err := filepath.Rel(Canonical(dir), Canonical(path))
-	if err != nil {
-		return false
-	}
-	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
-}
-
-// containsByIdentity asks the filesystem whether any ancestor of path IS dir,
-// which settles case-insensitive volumes and any other aliasing a name cannot
-// express. It walks upward because the interesting paths do not exist yet: the
-// leaf is a root that no run has created, and the component whose case differs
-// is one of its ancestors.
-//
-// A dir that does not exist has nothing to be identical to, so the spelling
-// answer stands alone for it.
-func containsByIdentity(dir, path string) bool {
-	dirInfo, err := os.Stat(dir)
-	if err != nil {
-		return false
-	}
-	current := Canonical(path)
-	for {
-		if info, err := os.Stat(current); err == nil && os.SameFile(dirInfo, info) {
-			return true
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return false
-		}
-		current = parent
-	}
+	return paths.Contains(dir, path)
 }

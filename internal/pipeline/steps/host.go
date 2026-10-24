@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/scm/gitea"
 	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 	"github.com/kunchenguid/no-mistakes/internal/scm/gitlab"
+	"github.com/kunchenguid/no-mistakes/internal/scm/origin"
 	"github.com/kunchenguid/no-mistakes/internal/scm/plugin"
 )
 
@@ -41,6 +42,19 @@ func resolvedProvider(sctx *pipeline.StepContext) scm.Provider {
 		provider = detectProviderForStep(sctx, *sctx.Run.PRURL)
 	}
 	return provider
+}
+
+// resolvedProviderForBody is resolvedProvider for the PR-body composition
+// helpers. They are also reachable from embeddings that assemble a body without
+// a repository or run record, where resolvedProvider would dereference a nil
+// field. A body with no repository has no detected provider and keeps GitHub's
+// closing grammar, which is what every body rendered under before GitLab's
+// grammar existed.
+func resolvedProviderForBody(sctx *pipeline.StepContext) scm.Provider {
+	if sctx == nil || sctx.Repo == nil || sctx.Run == nil {
+		return scm.ProviderUnknown
+	}
+	return resolvedProvider(sctx)
 }
 
 // providerPluginForStep returns the configured provider plugin that claims
@@ -134,7 +148,7 @@ func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, str
 			// the plain slug (without host prefix) is correct here.
 			forkRepo = github.RepoSlug(sctx.Repo.ForkURL)
 		}
-		draft := sctx.Config != nil && sctx.Config.Providers.GitHub.DraftPullRequests
+		draft := githubDraftPullRequestsEnabled(sctx)
 		return github.NewWithFork(cmdFactory, func() bool { return stepCLIAvailable(sctx, provider) }, host, repo, forkRepo, draft), ""
 	case scm.ProviderGitLab:
 		if sctx.Repo.ForkURL != "" {
@@ -194,7 +208,7 @@ func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, str
 		if strings.TrimSpace(remote) == "" && sctx.Run.PRURL != nil {
 			remote = *sctx.Run.PRURL
 		}
-		resolvedBase, repo, err := forgejo.ResolveRemote(remote, baseURL, scm.ResolveHost(sctx.Ctx, remote))
+		resolvedBase, repo, err := forgejo.ResolveRemoteWithSSHDomain(remote, baseURL, scm.ResolveHost(sctx.Ctx, remote), forgejoSSHDomainForStep(sctx))
 		if err != nil {
 			return nil, fmt.Sprintf("could not resolve Forgejo host and repository: %v", err)
 		}
@@ -225,14 +239,48 @@ func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, str
 		if repoSlug == "" {
 			return nil, "could not resolve Gitea owner/repo from the remote URL"
 		}
-		// login comes from tea's own config.yml (see scm.ResolveGiteaLogin); an
-		// empty login is tolerated here and surfaces as an actionable error
+		// The account comes from tea's own config (see scm.ResolveTeaAccount);
+		// a missing one is tolerated here and surfaces as an actionable error
 		// from Host.Available instead of failing host construction outright.
-		login := scm.ResolveGiteaLogin(host)
-		return gitea.New(cmdFactory, func() bool { return stepCLIAvailable(sctx, provider) }, host, login, repoSlug), ""
+		account := scm.ResolveTeaAccount(host)
+		return gitea.New(cmdFactory, func() bool { return stepCLIAvailable(sctx, provider) }, host, account, repoSlug), ""
+	case scm.ProviderOrigin:
+		if sctx.Repo.ForkURL != "" {
+			return nil, "fork PR routing for Cursor Origin is not implemented"
+		}
+		repoSlug := origin.RepoSlug(sctx.Repo.UpstreamURL)
+		if repoSlug == "" && sctx.Run.PRURL != nil {
+			repoSlug = origin.RepoSlug(*sctx.Run.PRURL)
+		}
+		if repoSlug == "" {
+			return nil, "could not resolve Cursor Origin owner/repo from the remote URL"
+		}
+		draft := sctx.Config != nil && sctx.Config.Providers.Origin.DraftPullRequests
+		return origin.New(cmdFactory, func() bool { return stepCLIAvailable(sctx, provider) }, repoSlug, draft), ""
 	default:
 		return nil, fmt.Sprintf("provider %s is not supported yet", provider)
 	}
+}
+
+// githubDraftPullRequestsEnabled resolves the upstream-only mode from the
+// destination and configured fork owners. Unknown owner information fails
+// closed to the existing non-draft behavior.
+func githubDraftPullRequestsEnabled(sctx *pipeline.StepContext) bool {
+	if sctx.Config == nil {
+		return false
+	}
+	settings := sctx.Config.Providers.GitHub
+	if settings.DraftPullRequests {
+		return true
+	}
+	if !settings.DraftUpstreamPullRequests || strings.TrimSpace(sctx.Repo.ForkURL) == "" {
+		return false
+	}
+	baseSlug := github.RepoSlug(sctx.Repo.UpstreamURL)
+	headSlug := github.RepoSlug(sctx.Repo.ForkURL)
+	baseOwner, _, baseOK := strings.Cut(baseSlug, "/")
+	headOwner, _, headOK := strings.Cut(headSlug, "/")
+	return baseOK && headOK && baseOwner != "" && headOwner != "" && !strings.EqualFold(baseOwner, headOwner)
 }
 
 // BuildHostForTest exposes buildHost to tests in other packages.
@@ -286,11 +334,23 @@ func buildPluginHost(sctx *pipeline.StepContext, name string, cmdFactory plugin.
 }
 
 func detectProviderForStep(sctx *pipeline.StepContext, remoteURL string) scm.Provider {
-	return scm.DetectProviderContextWithForgejoBaseURL(sctx.Ctx, remoteURL, forgejoBaseURLForStep(sctx))
+	return scm.DetectProviderContextWithForgejo(sctx.Ctx, remoteURL, scm.ForgejoEnvironment{
+		BaseURL:   forgejoBaseURLForStep(sctx),
+		SSHDomain: forgejoSSHDomainForStep(sctx),
+	})
 }
 
 func forgejoBaseURLForStep(sctx *pipeline.StepContext) string {
 	if value, ok := effectiveStepEnvValue(sctx, "FORGEJO_BASE_URL"); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+// forgejoSSHDomainForStep reads the SSH hostname an instance publishes in clone
+// URLs when it differs from its web host, mirroring Forgejo's SSH_DOMAIN.
+func forgejoSSHDomainForStep(sctx *pipeline.StepContext) string {
+	if value, ok := effectiveStepEnvValue(sctx, "FORGEJO_SSH_DOMAIN"); ok {
 		return strings.TrimSpace(value)
 	}
 	return ""

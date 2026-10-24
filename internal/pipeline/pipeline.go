@@ -13,6 +13,15 @@ import (
 
 var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 
+// ErrDaemonShutdown is the cancellation cause RunManager.Shutdown gives every
+// active run.
+var ErrDaemonShutdown = errors.New("daemon shutting down")
+
+// ErrParkedAtShutdown is returned when a daemon shutdown reached a run that was
+// fully recorded as waiting at an approval gate. The run keeps that record so
+// the next start resumes it, as it would after a crash.
+var ErrParkedAtShutdown = errors.New("run left parked at an approval gate by daemon shutdown")
+
 // StepContext provides shared resources to pipeline steps during execution.
 type StepContext struct {
 	Ctx              context.Context
@@ -53,6 +62,9 @@ type StepContext struct {
 	// combination is reachable - not to forbid it.
 	FinalizingAnswers     bool
 	ReviewStartingHeadSHA string
+	// CoverageContinuation names the exact stored round accepted at the gate.
+	// The real review consumer re-reads and validates its scope before reuse.
+	CoverageContinuation *db.StepRound
 	// CarriedFindings is the outstanding set an ANSWER round carries in, minus
 	// the reviewer's own open-question rows (see answerRoundCarriedFindings),
 	// so the finalize turn re-adjudicates by id only findings it made itself.
@@ -60,6 +72,11 @@ type StepContext struct {
 	CarriedFindings  string
 	PreviousFindings string // JSON findings selected for the current fix round
 	DeferredFindings string // JSON findings left unselected when the current fix round began
+	// AutoFixRound is true when the automatic fix loop, not a human response,
+	// started the current fix round. Only then do DeferredFindings hold
+	// findings nobody has decided on: a human fix response accounts for every
+	// finding it leaves unselected as an explicit decline.
+	AutoFixRound bool
 	// StepResultID is the DB row ID of the current step's step_results record.
 	// Steps use it to query their own round history for multi-round prompts.
 	StepResultID string
@@ -131,6 +148,10 @@ type StepContext struct {
 	// ClosingIssueRefs are the explicit --closes values claimed from the DB at
 	// PR-step start. Steps read this snapshot instead of mutable run state.
 	ClosingIssueRefs []string
+
+	// All validation steps share the actual diff-base pin; runs.base_sha is
+	// the previous push, not necessarily the base resolved by a fresh fetch.
+	crashRetryBaseSHA *string
 }
 
 // RunAgentSession executes one turn of a durable review-loop role session,
@@ -146,6 +167,7 @@ func (sctx *StepContext) RunAgentSession(role SessionRole, opts agent.RunOpts) (
 
 // StepOutcome is the result of executing a pipeline step.
 type StepOutcome struct {
+	CIReadyNoCI   *bool
 	NeedsApproval bool // whether the step pauses for user action
 	AutoFixable   bool
 	Findings      string // JSON findings for TUI display (optional)

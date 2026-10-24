@@ -66,7 +66,7 @@ func TestCIStep_ProtectedPathRetryUsesPersistedRepair(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				return &agent.Result{Output: json.RawMessage(`{"summary":"repair CI","code_change_needed":true,"findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
+				return &agent.Result{Output: json.RawMessage(`{"summary":"repair CI","code_change_needed":true,"findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"surface":"product","evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
 			}}
 			f.sctx.Config.ProtectedPaths = []string{"*.lock"}
 			outcome, err := f.run(t)
@@ -420,7 +420,7 @@ func TestCIStep_ProtectedPathRefusalStopsAutomaticAndManualRepair(t *testing.T) 
 						t.Fatal(err)
 					}
 				}
-				return &agent.Result{Output: json.RawMessage(`{"summary":"repair checks","code_change_needed":true,"findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
+				return &agent.Result{Output: json.RawMessage(`{"summary":"repair checks","code_change_needed":true,"findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"surface":"product","evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
 			}}
 			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 			sctx.Env = append(fakeCIGH(t, "OPEN", `[{"name":"test","state":"FAILURE","bucket":"fail","app":"github-actions"},{"name":"Greptile Review","state":"FAILURE","bucket":"fail","app":"greptile-apps"}]`), `FAKE_CLI_REVIEW_COMMENTS=[{"author":"greptile-apps[bot]","path":"main.go","line":4,"body":"deferred bot finding"}]`)
@@ -495,7 +495,7 @@ func TestTestStep_FixMode_ProtectedPathDoesNotReachCommit(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		return &agent.Result{Output: json.RawMessage(`{"summary":"repair test failure","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
+		return &agent.Result{Output: json.RawMessage(`{"summary":"repair test failure","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"surface":"product","evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	repo, err := config.LoadRepoFromBytes([]byte("commands:\n  test: exit 0\nprotected_paths:\n  - generated-ledger.json\n"))
@@ -639,9 +639,11 @@ func TestStagePipelineChanges_KeepsRecordedSubmodulePointer(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		agentFix bool
+		scratch  bool
 	}{
-		{"with_agent_fix", true},
-		{"stale_pointer_only", false},
+		{"with_agent_fix", true, false},
+		{"stale_pointer_only", false, false},
+		{"with_agent_fix_and_staged_scratch", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -679,6 +681,15 @@ func TestStagePipelineChanges_KeepsRecordedSubmodulePointer(t *testing.T) {
 				}
 			}
 
+			if tc.scratch {
+				writeRepoFiles(t, dir, map[string]string{
+					".cache/tool/output": "cached\n",
+					"tests/_all.sh":      "scratch\n",
+				})
+				gitCmd(t, dir, "add", ".cache/tool/output", "tests/_all.sh")
+				writeRepoFiles(t, dir, map[string]string{"tests/_all.sh": "modified scratch\n"})
+			}
+
 			sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
 			committed, err := commitAgentFixesWithResult(sctx, types.StepLint, "fix lint", "", nil)
 			if err != nil {
@@ -689,6 +700,16 @@ func TestStagePipelineChanges_KeepsRecordedSubmodulePointer(t *testing.T) {
 			}
 			if got := gitCmd(t, dir, "rev-parse", "HEAD:module"); got != bumped {
 				t.Errorf("fix commit recorded submodule pointer %s, want the base's %s (stale checkout %s)", got, bumped, stale)
+			}
+			if tc.scratch {
+				for _, file := range []string{".cache/tool/output", "tests/_all.sh"} {
+					if got := gitCmd(t, dir, "ls-files", "--", file); got != "" {
+						t.Errorf("scratch reached the index or commit: %q", got)
+					}
+					if _, err := os.Stat(filepath.Join(dir, file)); err != nil {
+						t.Errorf("scratch did not survive in the worktree: %v", err)
+					}
+				}
 			}
 			if tc.agentFix {
 				gitCmd(t, dir, "cat-file", "-e", "HEAD:fix.txt")
@@ -756,7 +777,7 @@ func TestProtectedPaths_UnreadableStatusFailsClosed(t *testing.T) {
 	t.Parallel()
 	sctx := newTestContext(t, &mockAgent{}, t.TempDir(), "", "", config.Commands{})
 	sctx.Config.ProtectedPaths = []string{"*.lock"}
-	if err := stagePipelineChanges(sctx); err == nil || !strings.Contains(err.Error(), "check protected_paths") {
+	if err := stagePipelineChanges(sctx); err == nil || !strings.Contains(err.Error(), "check protected_paths and scratch") {
 		t.Fatalf("unreadable git status did not fail closed: %v", err)
 	}
 }

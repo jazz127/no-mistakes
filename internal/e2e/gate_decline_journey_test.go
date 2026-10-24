@@ -116,6 +116,7 @@ func TestGateDeclineJourney_PartialSelectionKeepsEarlierFixes(t *testing.T) {
         - name: fixture
           result: pass
           live: true
+          surface: product
           evidence: fixture
           reason: ""
       verdict: go

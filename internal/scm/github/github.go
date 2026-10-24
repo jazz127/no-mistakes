@@ -144,7 +144,7 @@ func repoOwner(slug string) string {
 func (h *Host) Provider() scm.Provider { return scm.ProviderGitHub }
 
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, ReviewComments: true}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, ReviewComments: true, ClosingReferences: true}
 }
 
 func (h *Host) Available(ctx context.Context) error {
@@ -236,6 +236,24 @@ func parsePullRequestURL(raw, expectedHost, expectedRepo string) (int, error) {
 	return number, nil
 }
 
+// stdoutOnly runs cmd and returns its stdout alone, so notices a gh wrapper
+// writes to stderr never become part of the data. On failure, detail carries
+// the trimmed stderr, or stdout when stderr is empty.
+func stdoutOnly(cmd *exec.Cmd) (out []byte, detail string, err error) {
+	out, err = cmd.Output()
+	if err == nil {
+		return out, "", nil
+	}
+	detail = strings.TrimSpace(string(out))
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+			detail = stderr
+		}
+	}
+	return out, detail, err
+}
+
 func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error) {
 	args := []string{"pr", "list", "--head", branch}
 	if strings.TrimSpace(base) != "" {
@@ -248,9 +266,9 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 	}
 	args = append(args, "--state", "open", "--json", jsonFields)
 	cmd := h.cmd(ctx, "gh", args...)
-	out, err := cmd.CombinedOutput()
+	out, detail, err := stdoutOnly(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("gh pr list: %s: %w", strings.TrimSpace(string(out)), err)
+		return nil, fmt.Errorf("gh pr list: %s: %w", detail, err)
 	}
 	var prs []struct {
 		Number              int    `json:"number"`
@@ -336,9 +354,9 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 	args = append(args, "--title", content.Title, "--body-file", "-")
 	cmd := h.cmd(ctx, "gh", args...)
 	cmd.Stdin = strings.NewReader(content.Body)
-	out, err := cmd.CombinedOutput()
+	out, detail, err := stdoutOnly(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("gh pr create: %s: %w", strings.TrimSpace(string(out)), err)
+		return nil, fmt.Errorf("gh pr create: %s: %w", detail, err)
 	}
 	url := strings.TrimSpace(string(out))
 	pr := &scm.PR{URL: url}
@@ -348,20 +366,48 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 	return pr, nil
 }
 
+// UpdatePR rewrites the PR title (when non-empty) and body with a REST PATCH
+// instead of `gh pr edit`. `gh pr edit` first runs a GraphQL lookup that selects
+// reviewRequests, including Team.organization, which a token limited to the
+// repo and workflow scopes cannot read (it needs read:org), so a pure content
+// rewrite failed for those tokens. The PATCH sends only the fields it changes.
 func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
 	selector, err := prSelector(pr)
 	if err != nil {
 		return nil, err
 	}
-	args := append([]string{"pr", "edit", selector}, h.repoArgs()...)
-	if strings.TrimSpace(content.Title) != "" {
-		args = append(args, "--title", content.Title)
+	number := selector
+	if _, convErr := strconv.Atoi(number); convErr != nil {
+		if number, err = scm.ExtractPRNumber(selector); err != nil {
+			return nil, err
+		}
 	}
-	args = append(args, "--body-file", "-")
+	// Fail closed like prSelector: without a known repository `gh api` would
+	// expand {owner}/{repo} from the cwd, which is the detached gate repo.
+	slug := h.repoSlug()
+	if slug == "" {
+		slug = RepoSlug(pr.URL)
+	}
+	if slug == "" {
+		return nil, errors.New("no repository known for PR update; refusing to let gh infer one from the cwd")
+	}
+	fields := map[string]string{"body": content.Body}
+	if strings.TrimSpace(content.Title) != "" {
+		fields["title"] = content.Title
+	}
+	payload, err := json.Marshal(fields)
+	if err != nil {
+		return nil, fmt.Errorf("encode PR update: %w", err)
+	}
+	args := []string{"api"}
+	if h.host != "" {
+		args = append(args, "--hostname", h.host)
+	}
+	args = append(args, "--method", "PATCH", "repos/"+slug+"/pulls/"+number, "--input", "-")
 	cmd := h.cmd(ctx, "gh", args...)
-	cmd.Stdin = strings.NewReader(content.Body)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("gh pr edit: %s: %w", strings.TrimSpace(string(out)), err)
+	cmd.Stdin = bytes.NewReader(payload)
+	if _, detail, err := stdoutOnly(cmd); err != nil {
+		return nil, fmt.Errorf("gh api PATCH pull request: %s: %w", detail, err)
 	}
 	return pr, nil
 }
@@ -479,12 +525,12 @@ func (h *Host) getPRChecks(ctx context.Context, selector string) ([]scm.Check, e
 	args := append([]string{"pr", "checks", selector}, h.repoArgs()...)
 	args = append(args, "--json", "name,state,bucket,completedAt,link")
 	cmd := h.cmd(ctx, "gh", args...)
-	out, err := cmd.CombinedOutput()
+	out, detail, err := stdoutOnly(cmd)
 	if err != nil {
-		if strings.Contains(string(out), "no checks reported") {
+		if strings.Contains(detail, "no checks reported") {
 			out = []byte("[]")
 		} else {
-			return nil, fmt.Errorf("gh pr checks: %s: %w", strings.TrimSpace(string(out)), err)
+			return nil, fmt.Errorf("gh pr checks: %s: %w", detail, err)
 		}
 	}
 	var raw []struct {
@@ -1137,13 +1183,30 @@ func (h *Host) GetMergeableState(ctx context.Context, pr *scm.PR) (scm.Mergeable
 		return "", err
 	}
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
-	args = append(args, "--json", "mergeable", "--jq", ".mergeable")
+	args = append(args, "--json", "mergeable,mergeStateStatus", "--jq", `.mergeable + " " + .mergeStateStatus`)
 	cmd := h.cmd(ctx, "gh", args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("gh pr view mergeable: %w", err)
 	}
-	return normalizeMergeableState(strings.TrimSpace(string(out))), nil
+	return parseMergeableState(string(out)), nil
+}
+
+// parseMergeableState reads "<mergeable> <mergeStateStatus>". mergeable alone
+// is MERGEABLE for a conflict-free PR that is behind its base, so a merge the
+// base's "require branches to be up to date" rule refuses looked mergeable.
+// GitHub reports mergeStateStatus BEHIND only under that rule; without it a
+// behind PR reads CLEAN, so BEHIND alone is the signal.
+func parseMergeableState(out string) scm.MergeableState {
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return normalizeMergeableState("")
+	}
+	state := normalizeMergeableState(fields[0])
+	if state == scm.MergeableOK && len(fields) > 1 && strings.EqualFold(fields[1], "BEHIND") {
+		return scm.MergeableBehind
+	}
+	return state
 }
 
 func (h *Host) FetchFailedCheckLogs(ctx context.Context, pr *scm.PR, branch, headSHA string, failingNames []string) (string, error) {
@@ -1508,7 +1571,7 @@ func (h *Host) GetReviewComments(ctx context.Context, pr *scm.PR) ([]scm.ReviewC
 				continue
 			}
 			for _, raw := range thread.Comments.Nodes {
-				if raw.Author == nil || !scm.IsReviewBotLogin(raw.Author.Login) {
+				if raw.Author == nil || !scm.IsReviewBotLogin(scm.ProviderGitHub, raw.Author.Login) {
 					continue
 				}
 				line := 0

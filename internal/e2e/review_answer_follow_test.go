@@ -28,6 +28,7 @@ const cleanCatchAllAction = `  - text: "no issues found"
         - name: "fakeagent: simulated end-to-end scenario"
           result: pass
           live: true
+          surface: product # Canned protocol claim, not product evidence.
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go

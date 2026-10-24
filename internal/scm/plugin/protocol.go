@@ -57,10 +57,10 @@ const (
 // exit that carries an error object, oversized output, or an invocation that
 // outlived its timeout. Steps fail on it instead of skipping: a skip would
 // let a run read as passed-with-skips off an answer nothing validated. A
-// plugin that exits non-zero to say it cannot serve the repository (for
-// example it is not authenticated) is not a protocol violation; that skips
-// with the plugin's own message, like a built-in provider whose CLI is not
-// logged in.
+// plugin whose status handshake exits non-zero to say it cannot serve the
+// repository (for example it is not authenticated) is not a protocol violation;
+// that skips with the plugin's own message, like a built-in provider whose CLI
+// is not logged in.
 var ErrProtocol = errors.New("provider plugin protocol violation")
 
 // ErrTimeout additionally marks the ErrProtocol of an invocation that

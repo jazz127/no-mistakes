@@ -85,6 +85,10 @@ auto_fix:
 ci:
   rerun_transient: 0
   revalidate_repairs: false
+  review_bot_comments: on_failure # or: always
+  rebase_behind: false
+  carry_review_on_replay: false
+  release_after_checks_pass: false
 
 rebase:
   strategy: rebase # or: merge
@@ -114,6 +118,7 @@ test:
     attach_media: true
     dir: .no-mistakes/evidence
     branch: no-mistakes/evidence
+    commit_message: "no-mistakes: evidence for {{.Branch}} (run {{.RunID}})"
     retention: 336h
     max_runs: 200
 
@@ -125,6 +130,8 @@ providers:
   bitbucket:
     draft_pull_requests: false
   azuredevops:
+    draft_pull_requests: false
+  origin:
     draft_pull_requests: false
 ```
 
@@ -155,7 +162,7 @@ You can also set an ordered fallback list:
 agent: [codex, grok]
 ```
 
-The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent.
+The list is filtered to entries available to the daemon at run startup. By default, the first available entry becomes the primary agent; opt-in [quota-aware routing](#quota_routing) can reorder that resolved list.
 After resolving `auto`, entries that resolve to the same ACP target are deduplicated in list order, so `cursor` and `acp:cursor` (or `devin` and `acp:devin`) provide one fallback and preserve whichever spelling appears first.
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
@@ -241,7 +248,7 @@ Model and reasoning effort per agent, in one common spelling. no-mistakes maps e
 
 |         |                                                                                     |
 | ------- | ----------------------------------------------------------------------------------- |
-| Type    | `map[string]{model, effort}`                                                        |
+| Type    | `map[string]{model, effort, quota_provider}`                                         |
 | Keys    | `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `copilot`, `antigravity`, `cursor`, `devin`, `acp:<target>` |
 | Default | Empty (every harness keeps its own defaults)                                        |
 
@@ -270,14 +277,19 @@ How each field maps:
 | `grok`            | `--model`                                     | `--reasoning-effort`              | whatever the selected reasoning model accepts       |
 | `copilot`         | `--model`                                     | `--effort`                        | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`  |
 | `pi`              | `--model`                                     | `--thinking`                      | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`  |
-| `opencode`        | session-message `model` (needs `provider/model`) | session-message `variant`      | provider-specific                                   |
+| `opencode`        | session `model` (needs `provider/model`)         | session model `variant`        | provider-specific                                   |
 | `cursor`, `devin`, `acp:*` | `acpx --model`                       | not expressible                   | -                                                   |
 | `rovodev`         | not expressible                               | not expressible                   | -                                                   |
 | `antigravity`     | not expressible                               | not expressible                   | -                                                   |
 
-`opencode` needs the `provider/model` form (for example `openai/gpt-5`) because its session API takes the provider and the model as separate fields; a bare model name is refused at config load rather than dropped. Both of its knobs travel in the session message, not in the launch command, because `opencode serve` exits with usage on an unknown flag.
+`opencode` needs the `provider/model` form (for example `openai/gpt-5`) because its session API takes the provider and the model as separate fields; a bare model name is refused at config load rather than dropped.
+OpenCode 2 receives both knobs in the model reference when the session is created; an effort-only profile resolves the location's default model first.
+OpenCode 1 receives them in the session message.
+Neither version receives model flags in the launch command, because `opencode serve` rejects them.
 
-`rovodev` and `antigravity` have no mechanism no-mistakes can set - `acli rovodev serve` plus its REST session API take no model parameter, and the `agy` CLI parses flags strictly - so `agent_config` for them is a config error rather than a request that quietly does nothing. Reach for [`agent_args_override`](#agent_args_override) there if your build of the CLI accepts a flag. Reasoning effort is likewise unavailable for ACP targets: no-mistakes drives them through `acpx`, which exposes `--model` but no effort surface. acpx also accepts only the model ids a target advertises over ACP; for `devin` that is a subset of `devin models list`, and [`acp_registry_overrides`](#acp_registry_overrides) is the escape hatch for the rest.
+An entry may also declare `quota_provider`, the quota-axi provider ID used as routing input when `quota_routing.enabled` is on. It does not set a harness option. See [quota-aware routing](#quota_routing) for provider defaults, Pi's explicit-provider requirement, and account selection.
+
+`rovodev` and `antigravity` have no mechanism no-mistakes can set - `acli rovodev serve` plus its REST session API take no model parameter, and the `agy` CLI parses flags strictly - so setting `model` or `effort` for them is a config error. An entry containing only `quota_provider` is valid. Reach for [`agent_args_override`](#agent_args_override) there if your build of the CLI accepts a flag. Reasoning effort is likewise unavailable for ACP targets: no-mistakes drives them through `acpx`, which exposes `--model` but no effort surface. acpx also accepts only the model ids a target advertises over ACP; for `devin` that is a subset of `devin models list`, and [`acp_registry_overrides`](#acp_registry_overrides) is the escape hatch for the rest.
 
 `agent_config` is global-only. Like `agent_args_override`, it decides which model runs with your credentials, so an `agent_config` block in a repository's `.no-mistakes.yaml` is ignored. For first-class ACP aliases, `cursor` and `acp:cursor` share a profile, as do `devin` and `acp:devin`: the selected spelling's entry wins when both are configured; otherwise the other spelling's entry applies. This also applies to review-agent profiles.
 
@@ -309,14 +321,24 @@ resolve to nonempty values before a run starts. Use a provider-qualified model
 ID from Pi's catalog, not a bare name, URL, glob, or `:thinking` suffix.
 Supported effort spellings are `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
 Availability, authentication, and model-specific reasoning support remain Pi's
-responsibility; no-mistakes does not inspect subscriptions or query quotas.
+responsibility. For optional quota evidence at run start, see
+[quota-aware routing](#quota_routing).
 
 A pin applies to **every pipeline duty**, including reviewer and fixer roles.
-The effective trusted agent selection must be Pi-only (no `auto`, non-Pi
-fallbacks, or non-Pi `review_agents`), including `agent` / fallbacks from the
-trusted default-branch `.no-mistakes.yaml`. That check runs before any active
-validation is cancelled. Pi role-specific model/effort values are
-superseded by the run pin. Native `--model`, `--provider`, `--models`,
+The effective agent selection must be Pi-only (no `auto`, non-Pi fallbacks, or
+non-Pi `review_agents`). Under the default trust policy, a nonempty `agent` in
+the freshly fetched, trusted default-branch `.no-mistakes.yaml` replaces the
+global scalar or fallback list for this check, just as it does for an ordinary
+run. This lets one project opt into Pi profiles with trusted `agent: pi` while
+other projects keep a global `agent: auto` or another global selection. When the
+trusted project config does not select an agent, the global selection must itself
+be Pi-only. If the trusted default branch enables `allow_repo_commands: true`,
+the submitted branch instead becomes the source of any repository `agent`
+override. Without that opt-in, an `agent: pi` that exists only on the submitted
+feature branch cannot authorize the profile. Unreadable or malformed
+submitted/trusted config refuses the profile. These checks run before any active
+validation is cancelled. Pi role-specific model/effort values are superseded by
+the run pin. Native `--model`, `--provider`, `--models`,
 `--thinking` (including `--flag=value`), or `--` in
 `agent_args_override.pi` conflict at launch: move defaults to `agent_config.pi`
 rather than combining two selection mechanisms.
@@ -540,7 +562,7 @@ provider_plugins:
 | `timeout` | no | Bound for one plugin invocation (Go duration). Defaults to `2m`. |
 | `draft_pull_requests` | no | Passes `--draft` to `pr create`. Defaults to `false`. |
 
-Names are 1-63 lowercase letters, digits, `-`, or `_` and must not reuse a built-in provider name. A run's provider shows up as `plugin:<name>`.
+Names are 1-63 lowercase letters, digits, `-`, or `_`, must start with a letter or digit, and must not reuse a built-in provider name. A run's provider shows up as `plugin:<name>`.
 
 Selection happens per run, before built-in detection and forge profiles: the remote's literal host token is matched first, then its SSH `HostName` resolution. An exact pattern beats a wildcard, and a longer wildcard beats a shorter one. Two plugins (or one plugin twice) may not list the same pattern, and a host that a [`forge_profiles`](#forge_profiles) entry claims may not also be claimed by a plugin; both are configuration errors. Because a forge profile matches the remote's literal host while a plugin also matches its SSH `HostName`, an overlap that only appears after alias resolution (a profile keyed by an SSH alias whose `HostName` a plugin claims) is refused when the run starts, with an error naming both.
 
@@ -550,7 +572,7 @@ Plugins run through the same environment as built-in provider CLIs (the daemon's
 
 ### ci_timeout
 
-How long the CI step monitors an open PR, including provider CI status and PR mergeability (on GitHub, GitLab, Forgejo, Azure DevOps, or a provider plugin declaring `mergeable_state`), before giving up.
+How long the CI step waits for provider CI status to settle before giving up, and how long it keeps monitoring an open PR after every check is green.
 
 |         |                                                 |
 | ------- | ----------------------------------------------- |
@@ -560,13 +582,14 @@ How long the CI step monitors an open PR, including provider CI status and PR me
 Accepts any Go `time.ParseDuration` string: `30m`, `2h`, `4h30m`, etc.
 
 This is an idle timeout, not an absolute deadline: every time the base branch advances, the monitor re-arms it.
-So an actively-updated green PR keeps its monitor no matter how long it stays open.
-If it later develops an actual merge conflict (on GitHub, GitLab, Forgejo, Azure DevOps, or a provider plugin declaring `mergeable_state`), the CI auto-fix path rebases it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and publishes it through Push, while a clean behind PR needs no command.
+So an actively-updated green PR keeps its monitor no matter how long it stays open; under [`ci.release_after_checks_pass`](#cirelease_after_checks_pass) that watch ends at the checks verdict instead.
+If it later develops an actual merge conflict, the [CI repair policy](/no-mistakes/reference/pipeline-steps/#ci) determines integration, revalidation, and publication.
+A clean behind PR needs no command. On GitHub, [`ci.rebase_behind`](#cirebase_behind) opts into automatic integration when the base requires up-to-date branches (`mergeStateStatus: BEHIND`).
 A genuinely idle/abandoned PR still parks at an approval gate after the timeout elapses.
 While that CI gate is parked, the daemon continues bounded read-only PR-state checks.
 If the PR is merged or closed externally, the stale gate completes automatically; an open, unknown, or temporarily unreachable PR remains parked for a user decision.
 
-Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or any non-positive duration to monitor until the PR is merged, closed, or the run is aborted with `no-mistakes axi abort --run <id>`.
+Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or any non-positive duration to disable this timeout. A run still ends when the PR is merged or closed, or at readiness under `ci.release_after_checks_pass`. You can cancel it with `no-mistakes axi abort --run <id>`.
 
 Legacy alias: `babysit_timeout`.
 
@@ -586,6 +609,26 @@ This is observability only.
 It does not cancel the step, change auto-fix behavior, or mark the run failed.
 AXI renders the quiet signal in the `active_steps` table as part of `last_activity`, for example `quiet 12m3s ago: codex started pid=4242`.
 For older active runs that do not yet have activity rows, AXI falls back to the step log file's modification time.
+
+### agent_crash_retries
+
+Opt-in automatic retries of an agent-crashed Review, Test, Document or Lint step in the **same live run**. Completed steps stay completed. Set `agent_crash_retries: 1` to allow one additional attempt; the default `0` preserves the existing failure behavior.
+
+|         |                  |
+| ------- | ---------------- |
+| Type    | integer          |
+| Range   | `0`–`3`          |
+| Default | `0` (disabled)   |
+
+Agent process exits and agent invocation timeout cuts qualify, never a real finding, test verdict, configured-command failure, Git error, or cancellation. Typed terminal provider signals, including authentication/access-denial errors and quota exhaustion, stay terminal. OpenCode replay-unsafe failures also stay terminal, even when the local proof below is unchanged; see the [tool-evidence rule](#quota_routing). Adapters that give no typed terminal signal (Pi, Grok) can have an auth or quota failure retried up to `agent_crash_retries` times before failing with the original diagnostic. Existing adapter and analyzer formatting retries run first; exhausted adapter-transient failures and Claude's native structured-output retry exhaustion stay terminal. Each additional attempt must still produce a valid result; a crash is never a pass.
+
+Eligible validation steps also pin their freshly resolved diff base across the live run: a later fetch that changes that base fails before invoking another agent, even if the run's recorded previous-push SHA did not change. A full restart at Review establishes a new base pin.
+
+Before retrying, the executor proves that the run and worktree head SHA, recorded base SHA, effective configuration, completed-step records/rounds and evidence-file hashes still match their pre-attempt snapshot. The worktree must be clean before and after the attempt, including untracked and ignored files. Missing or changed proof refuses the retry and fails normally: no in-run restart is attempted; start a fresh run for full validation from step 1. Partial edits, commits or evidence from a crashed attempt are never silently discarded or certified. The log records the `agent_invocation` retry or proof refusal; an exhausted retry still fails with its agent diagnostic.
+
+A hang cut by the default invocation budget can qualify. A non-default agent timeout, or any still-working cap, disables timeout-based crash retries; the shipped timeout values count as unconfigured even when the generated config writes them explicitly. Process exits can still qualify. Test budget cuts that already park for an operator decision remain parked, not automatically retried.
+
+Fix rounds, review-answer/coverage continuations, conflict resolution, custom gates, Intent and Push/PR/CI delivery are not replayed or retried. This budget is separate from `auto_fix`, is not replenished by approval rounds, and is disabled for the remainder of a run resumed after daemon recovery; a later agent crash fails that step normally. It does not continue a terminal run: [`axi retry`](/no-mistakes/reference/cli/#no-mistakes-axi-retry) is the separate manual continuation, using the shared `agent_invocation` cause and its own checkpoint proofs. Timeout cuts do not acquire that cause, and parser rejections remain terminal. It is global-only: repository config and environment variables cannot enable it.
 
 ### agent_timeout
 
@@ -804,6 +847,42 @@ Session identities are persisted only as minimum local resume metadata, never as
 The [daemon crash-recovery reference](/no-mistakes/concepts/daemon/#crash-recovery) owns which parked gates can resume or reconcile after a restart.
 Set `false` to force every agent invocation cold.
 
+### quota_routing
+
+Opt-in, quota-aware agent ordering at run start.
+
+|         |                                          |
+| ------- | ---------------------------------------- |
+| Type    | `map[string]{enabled, expected_run_length, read_timeout, quota_axi_path}` |
+| Default | `enabled: false` (the feature is opt-in) |
+
+When `enabled: true`, no-mistakes reads **one** snapshot with the locally installed `quota-axi --full --json` at the start of each run and reorders the resolved agent list by quota evidence before the run picks its head agent. Explicit [`review_agents`](#review_agents) overrides do not use quota routing. Ordering follows these rules:
+
+- An agent with concrete proof of exhaustion - runway `exhausted_now`, or a known `0%` remaining - is moved to the back of the list (it stays in the list, so the existing launch-failure fallback still has somewhere to go).
+- An agent whose runway is `projected_exhaustion` must have a reported usable runway greater than `expected_run_length`; otherwise it is treated like an exhausted one.
+- Runway `through_reset` passes.
+- Surviving agents with known applicable scopes and a `spendPriority` for each scope rank by the minimum of those priorities, highest first; ties keep your configured order.
+- An agent without proof of exhaustion whose applicable quota or `spendPriority` is unknown stays eligible but ranks below every ranked agent. Unknown candidates keep their configured order relative to each other.
+
+Native `claude` and `codex` retain account, profile, and model-scope matching. All other agents, including Pi, use only provider-level `all_models` or `all_products` scopes for their declared provider. Vendor-specific and named-model scopes do not affect their routing. Without provider-wide evidence, quota is unknown: the agent stays eligible and retains its configured order among unknown candidates.
+
+Each agent keeps its own [`agent_config`](#agent_config) model and effort: only the order changes. A missing, slow, or unreadable `quota-axi` keeps your configured order, logs the reason, and never blocks a run. The mid-run quota switch remains enabled in this case. Inspect the recorded outcome with `no-mistakes axi status` or [`no-mistakes stats`](/no-mistakes/reference/cli/#no-mistakes-stats). See [local telemetry](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine) for storage and privacy.
+
+Mid-run, a recognised quota-exhaustion error advances to the next agent in the chosen order with a fresh session, dropping any resumed session. This can happen once per agent, and later invocations do not return to earlier agents. If no successor remains, the error is returned. The existing agent-unavailable fallback is unchanged. Daemon recovery reuses the recorded order and last recorded switch without reading another snapshot, even if the global opt-in setting has since changed.
+
+OpenCode's tool-evidence rule takes precedence over quota switching, launch fallback, and [agent crash retries](#agent_crash_retries): a failure marked as having run tools, or as unable to prove that no tools ran, is returned without replaying the turn. Quota exhaustion does not override that refusal.
+
+Subkeys:
+
+- `enabled` (bool, default `false`): the opt-in switch.
+- `expected_run_length` (positive duration, default `90m`): the runway floor. A projected exhaustion that outlasts this window does not demote the agent; the value is an expectation for ordering, never a run cancel.
+- `read_timeout` (positive duration, default `15s`): bound on the single quota-axi read at run start. Quota-axi may delegate an expired session's renewal to the vendor CLI that owns it, so a slow read waits up to this long before the run proceeds on the configured order.
+- `quota_axi_path` (string, default `quota-axi` on `PATH`): the executable to run.
+
+`quota_routing` is global-only: it decides which of this machine's credential-bearing agents a run spends, so a `quota_routing` block in a repository's `.no-mistakes.yaml` is a config error rather than an ignored key.
+
+Provider mapping: `claude` and `codex` map to their same-named quota-axi providers by default. Any agent can declare [`quota_provider`](#agent_config) under `agent_config` to select a provider explicitly. An unmapped non-Pi agent ranks as unknown quota. A `pi` without an explicit provider disables reordering for the whole run with one warning: the configured order stands, the mid-run switch stays off, and the run record says why. Model names never infer a provider. For Pi with `quota_provider: codex`, the model prefix selects the published credential key (`codex-native/…` reads `codex-home`; `openai-codex-work/…` reads that Pi credential). For `quota_provider: claude`, explicit `profile:…` and `claude-swap:…` prefixes select that published profile. Other providers use their default account; a Pi provider prefix such as `kimi-coding` is not an account key. Routing checks published `accountKeys` membership in both quota schemas. A named credential missing from the report stays unknown rather than borrowing another account’s evidence.
+
 ### worktree_roots
 
 Where a repository's pipeline run worktrees are created.
@@ -848,9 +927,11 @@ Retention for leftover run-worktree directories under the default `<NM_HOME>/wor
 | `worktree.retention` | `string` | `24h`            | How long a leftover run worktree survives; `unlimited`/`none`/`off`/`never` or a non-positive duration disables the bound |
 | `worktree.max_runs`  | `int`    | `20`             | How many leftover worktree directories survive regardless of age; `0` disables the bound |
 
-A run's own worktree is already removed the instant its pipeline finishes, so this budget is a safety net rather than the normal path: it only ever governs the directory left behind by a `git worktree remove` failure (for example a vendored `.git` nested somewhere under a large `node_modules` tree) or a [protected-path](/no-mistakes/reference/repo-config/#protected_paths) refusal that later became removable. Without it, a leftover like that survived indefinitely on a long-running daemon that never restarts, since the crash-recovery sweep that also reclaims it (see the daemon's [worktree cleanup](/no-mistakes/concepts/daemon/#what-it-does)) runs only at startup.
+This budget applies to leftovers after the daemon's [normal worktree cleanup](/no-mistakes/concepts/daemon/#what-it-does). The daemon's [crash-recovery rules](/no-mistakes/concepts/daemon/#crash-recovery) own eligibility and preservation of active runs, protected-path refusals, and unpushed CI repairs.
 
 This reap runs after every finished run and again at daemon startup, the same cadence `test.evidence.retention` uses. Only the default `<NM_HOME>/worktrees` tree is bounded; a checkout you placed with [`worktree_roots`](#worktree_roots) is your own directory, and only the directories no-mistakes' own run records name there are ever touched, per that section's rules.
+
+Eligible directories are aged by their directory modification time. After expired directories are removed, the count bound removes the oldest survivors across all repositories in the default tree. Disabling one bound leaves the other in force; disable both to retain all eligible leftovers. An unparseable `retention` or negative `max_runs` rejects the global config.
 
 Global-only, for the same reason `test.evidence`'s local storage fields are: it governs this machine's local disk, so a repository does not get to set the retention budget for a directory every repository on the machine shares.
 
@@ -871,7 +952,7 @@ For empty `commands.lint`, the document step's combined housekeeping pass also a
 | `auto_fix.test`     | `int` | `3`     | Test failure auto-fix attempts                                                              |
 | `auto_fix.document` | `int` | `3`     | Not used by the automatic document pass                                                     |
 | `auto_fix.lint`     | `int` | `3`     | Lint issue auto-fix attempts                                                                |
-| `auto_fix.ci`       | `int` | `3`     | CI auto-fix attempts for CI failures, plus merge conflicts on GitHub, GitLab, Forgejo, Azure DevOps, and provider plugins declaring `mergeable_state` |
+| `auto_fix.ci`       | `int` | `3`     | CI auto-fix attempts for CI failures, plus merge conflicts on GitHub, GitLab, Forgejo, Azure DevOps, Cursor Origin, and provider plugins declaring `mergeable_state` |
 
 Legacy alias: `auto_fix.babysit`.
 
@@ -913,6 +994,70 @@ ci:
 ```
 
 A value in the trusted repository config overrides this global value in both directions: an explicit repository `true` enables revalidation when this is `false`, and an explicit repository `false` disables opt-in revalidation when this is `true`. When the trusted repository config omits the key, this global value applies.
+
+### ci.review_bot_comments
+
+The operator-level fallback for [`ci.review_bot_comments`](/no-mistakes/reference/repo-config/#cireview_bot_comments), whose per-repository reference owns the semantics and the trust boundary.
+
+| | |
+|---|---|
+| Type | `string` (`on_failure` or `always`) |
+| Default | `on_failure` |
+
+```yaml
+ci:
+  review_bot_comments: always
+```
+
+A value in the trusted repository config overrides this global value. An unrecognized value fails the config rather than falling back to the default.
+
+### ci.rebase_behind
+
+The operator-level fallback for [`ci.rebase_behind`](/no-mistakes/reference/repo-config/#cirebase_behind), whose per-repository reference owns the semantics, the cost, and the trust boundary.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `false` |
+
+```yaml
+ci:
+  rebase_behind: true
+```
+
+A value in the trusted repository config overrides this global value in both directions. When the trusted repository config omits the key, this global value applies.
+
+### ci.carry_review_on_replay
+
+The operator-level fallback for [`ci.carry_review_on_replay`](/no-mistakes/reference/repo-config/#cicarry_review_on_replay), whose per-repository reference owns the pure-replay proof, its limits, and the trust boundary.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `false` |
+
+```yaml
+ci:
+  carry_review_on_replay: true
+```
+
+A value in the trusted repository config overrides this global value in both directions. When the trusted repository config omits the key, this global value applies.
+
+### ci.release_after_checks_pass
+
+The operator-level fallback for [`ci.release_after_checks_pass`](/no-mistakes/reference/repo-config/#cirelease_after_checks_pass), whose per-repository reference owns the semantics, the cost, and the trust boundary.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `false` |
+
+```yaml
+ci:
+  release_after_checks_pass: true
+```
+
+A value in the trusted repository config overrides this global value in both directions. When the trusted repository config omits the key, this global value applies.
 
 ### rebase.strategy
 
@@ -966,6 +1111,7 @@ Changes apply to the next run, and to a run recovered after a daemon restart, wh
 ### commit.fix_message
 
 Template for the subject of commits created by the Review, Test, Document, Lint, and CI repair paths, plus operator-authorized repository gate repairs.
+When set to anything other than the default, it also renders the Push step's catch-all commit for remaining uncommitted changes, with `{{.Step}}` as `push` and `{{.Summary}}` as `apply agent fixes`; at the default, that commit keeps its `no-mistakes: apply agent fixes` subject.
 
 | | |
 | --- | --- |
@@ -976,7 +1122,7 @@ The template supports literal text and three Go-style placeholders:
 
 | Variable | Value |
 | --- | --- |
-| `{{.Step}}` | Pipeline step name, such as `review`, `test`, `document`, `lint`, `ci`, or `gate.test.mutation-budget` |
+| `{{.Step}}` | Pipeline step name, such as `review`, `test`, `document`, `lint`, `ci`, `push`, or `gate.test.mutation-budget` |
 | `{{.Summary}}` | Sanitized one-line summary returned by the fix agent, or the step's deterministic fallback summary |
 | `{{.Branch}}` | Normalized branch name, or the identifier captured and optionally transformed by [`commit.branch_pattern`](#commitbranch_pattern) and [`commit.branch_replacement`](#commitbranch_replacement) |
 
@@ -988,7 +1134,7 @@ Template functions, control actions, named templates, unknown placeholders, malf
 The blocked format set includes every Unicode `Bidi_Control` code point plus `U+00AD`, `U+180E`, `U+200B`, `U+2060` through `U+2064`, the deprecated bidi controls `U+206A` through `U+206F`, `U+FEFF`, `U+FFF9` through `U+FFFB`, and Unicode tag characters in `U+E0000` through `U+E007F`.
 Legitimate `U+200C` zero-width non-joiner and `U+200D` zero-width joiner text shaping remains allowed.
 The final rendered subject is validated again, so unsafe characters in an agent-provided summary are also rejected.
-The setting does not change commit subjects created by the Rebase or Push steps.
+The setting does not change commit subjects created by the Rebase step or the evidence-branch commit; see [`test.evidence`](#testevidence) for the latter.
 A per-repo [`commit.fix_message`](/no-mistakes/reference/repo-config/#commitfix_message) value overrides this global setting.
 
 ### commit.branch_pattern
@@ -1094,6 +1240,23 @@ A `commit.branch_replacement` must be paired with `commit.branch_pattern` in the
 Precedence for these formatting fields is explicit: `.no-mistakes.yaml` wins for every field it sets, then a matching machine-local override, then the plain global value, then the built-in default.
 As with the global replacement, a repository `commit.branch_pattern` replaces the matching machine-local pattern and clears its replacement.
 Repositories matching no block keep existing global and built-in behavior.
+
+#### Machine-local PR publication defaults
+
+A matching entry can select a repository's existing PR template without committing `.no-mistakes.yaml`:
+
+```yaml
+repository_overrides:
+  https://github.com/acme/widget.git:
+    pr:
+      template: .github/pull_request_template.md
+      appendix: collapsed
+```
+
+`pr.template` selects a repository-relative file, never local template contents. It uses the same [path and file validation](/no-mistakes/reference/repo-config/#prtemplate) as the repository setting, and its bytes are read only from the pinned trusted default-branch tree, never from the pushed branch or worktree.
+`pr.appendix` accepts `full`, `collapsed`, or `minimal` and can be set with or without `pr.template`; it uses the same [appendix and attestation behavior](/no-mistakes/reference/repo-config/#prappendix) as the repository setting. When template mode is active, author-edited narrative is preserved on later updates.
+For each field, a non-empty trusted repository value wins over the matching machine-local value. Leaving either unset retains existing behavior; an unset appendix defaults to `full`.
+These fields are available only under `repository_overrides`, not as machine-wide PR settings. `pr.publish_intent` remains trusted-repository-only.
 
 #### Machine-local review and documentation guidance
 
@@ -1215,6 +1378,7 @@ By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>`. On 
 | `test.evidence.attach_media`  | `bool`   | `true`                   | Upload image and video evidence to GitHub user-attachments when the PR is rendered |
 | `test.evidence.dir`           | `string` | `.no-mistakes/evidence`  | Directory prefix inside the evidence branch                                |
 | `test.evidence.branch`        | `string` | `no-mistakes/evidence`   | Name of the orphan evidence branch                                         |
+| `test.evidence.commit_message` | `string` | `no-mistakes: evidence for {{.Branch}} (run {{.RunID}})` | Subject template for evidence-branch commits |
 | `test.evidence.local_root`    | `string` | `<NM_HOME>/evidence`     | Absolute directory where run evidence is written on local disk             |
 | `test.evidence.retention`     | `string` | `336h` (14 days)         | How long a run's evidence survives; `unlimited`/`none`/`off`/`never` or a non-positive duration disables the bound |
 | `test.evidence.max_runs`      | `int`    | `200`                    | How many run directories survive regardless of age; `0` disables the bound |
@@ -1223,10 +1387,12 @@ The test step always collects evidence outside the worktree, so artifacts never 
 On GitHub.com and GitHub Enterprise Cloud, image and video artifacts that pass GitHub's attach rules (png, jpg, jpeg, gif, webp, svg, mp4, mov, webm; images at most 10 MiB and videos at most 100 MiB) are uploaded to GitHub user-attachments when the PR body is rendered, unless `attach_media` is false and `store_in_repo` is also false.
 The testing section embeds the returned image markdown or bare video URL so remote reviewers can open the media. Upload is fail-closed: any error, unsupported type, oversize file, GitHub Enterprise Server, non-GitHub forge, or GitHub App/Actions token keeps today's rendering (a commit-pinned evidence-branch link if `store_in_repo` published, otherwise a local path) rather than a dead attachment URL. Text artifacts stay inlined as they are today.
 When `store_in_repo` is true for a GitHub repository, the PR step copies that directory onto `branch` under `<dir>/<branch-slug>` in the code branch's push-target repository (the fork when fork routing is configured), pushes it, and links the artifacts from the pull request body.
+Published text files get the same home-directory redaction as the PR title and body, so a path under the operator's home is committed with that part rewritten to `~`. Binary and visual artifacts are published as written, and the local evidence files are never changed.
 When both `attach_media` and `store_in_repo` apply, the testing section carries the user-attachments embed in addition to the commit-pinned git link.
 The branch is an orphan: it shares no history with your code branches, so evidence never reaches the default branch. Links use the evidence commit rather than the branch, so they keep resolving after later runs.
 Branch slashes become nested directories, unsafe branch characters are replaced, and an empty branch slug falls back to the run ID.
 `branch` must be a valid Git branch name; an invalid value fails the config with the offending key and value.
+`commit_message` supports literal text and two placeholders: `{{.Branch}}` (the code branch name) and `{{.RunID}}` (the run ID). It follows the same template restrictions, size limits, and unsafe-character rules as [`commit.fix_message`](#commitfix_message); an invalid template fails configuration loading, and a subject that fails validation at publish time leaves the evidence unpublished.
 The publisher never force-pushes. It appends to the fetched evidence-branch tip with a fast-forward push, retries one lost race, and refuses to use the run branch, default branch, or an existing branch whose tip lacks the `.no-mistakes-evidence` marker.
 Publication is also refused when the remote cannot be read or pushed, an artifact exceeds 64 MiB, a run exceeds 500 files or 256 MiB, or another writer wins the retry. The PR body then keeps its local rendering instead of adding links that would not resolve.
 Evidence-branch publication currently supports GitHub links only. On other providers, no evidence branch is pushed and the PR body keeps its local rendering.
@@ -1245,11 +1411,11 @@ no-mistakes reaps its recorded run directories itself rather than relying on an 
 
 Reaping runs after each finished run and again at daemon startup. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
 
-`local_root` must be an absolute path outside `<NM_HOME>/worktrees`; a relative or managed-worktree path fails daemon startup and prevents new or recovered runs from starting. Because `retention` bounds how long a PR body's local artifact links keep resolving, raise it rather than lowering it if your reviews run long.
+`local_root` must be an absolute path outside `<NM_HOME>/worktrees` and must not equal, contain, or sit inside `<NM_HOME>/logs`. Placement checks resolve symlinks, including existing ancestors of paths not yet created, and recognize filesystem aliases such as case variants on case-insensitive volumes. These restrictions keep publishable evidence separate from private logs and configuration snapshots. An invalid placement fails daemon startup and prevents new or recovered runs from starting. Because `retention` bounds how long a PR body's local artifact links keep resolving, raise it rather than lowering it if your reviews run long.
 
-The publication fields are global defaults. Repo config can override `store_in_repo`, `attach_media`, and `dir`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
+The publication fields are global defaults. Repo config can override `store_in_repo`, `attach_media`, `dir`, and `commit_message`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
 
-`test.evidence.retention` and `test.evidence.max_runs` also bound `<NM_HOME>/logs/<run-id>` (per-run step logs), reaped on the same cadence rather than through a second config surface for the same kind of per-run diagnostic artifact.
+`test.evidence.retention` and `test.evidence.max_runs` also bound `<NM_HOME>/logs/<run-id>` (per-run step logs), reaped on the same cadence. Log age uses the newest contained file modification time, with the directory's modification time as a floor, so appending to an existing step log counts as recent activity. The age and count bounds apply separately to logs and evidence. Unrecognized log directories, pending/running runs, and CI-interrupted runs whose worktrees may hold unpushed commits are left untouched. Expired step logs become unavailable to `axi logs`; run records remain in the database. Daemon-process and CLI log files are outside this policy; see [Logging](/no-mistakes/concepts/daemon/#logging).
 
 ### eval
 
@@ -1278,15 +1444,15 @@ These are operator settings for this machine's local disk, so they are global-on
 
 ### providers.github.draft_pull_requests
 
-Open pull requests created on GitHub as drafts (`gh pr create --draft`).
+Open pull requests created on GitHub as drafts (`gh pr create --draft`). Set `upstream` to draft only when the base repository owner differs from the configured fork owner.
 
 | | |
 |---|---|
-| Type | `bool` |
+| Type | `bool` or `"upstream"` |
 | Default | `false` |
 
 Only affects PR creation; existing PRs are not toggled between draft and ready. GitHub only — ignored for other providers.
-This is a global default. Per-repo config can override it via `providers.github.draft_pull_requests`.
+`true` and `false` retain their existing behavior. In `upstream` mode, no-mistakes compares the owner in the PR's base repository URL with the owner in the configured fork URL, and adds `--draft` when they differ (compared case-insensitively). If either owner is unavailable, it keeps the PR non-draft. This lets house systems draft upstream PRs while leaving same-owner fork PRs ready for review. This is a global default; per-repo config can override it via `providers.github.draft_pull_requests`.
 
 ### providers.gitlab.draft_pull_requests
 
@@ -1323,6 +1489,19 @@ Open pull requests created on Azure DevOps as drafts (`az repos pr create --draf
 
 Only affects PR creation; existing PRs are not toggled between draft and ready. Azure DevOps only — ignored for other providers.
 This is a global default. Per-repo config can override it via `providers.azuredevops.draft_pull_requests`.
+
+### providers.origin.draft_pull_requests
+
+Open pull requests created on Cursor Origin as drafts (`origin pr create --status draft`).
+When false (the default), no-mistakes passes `--status open` because the Origin CLI otherwise defaults to draft.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `false` |
+
+Only affects PR creation; existing PRs are not toggled between draft and ready. Cursor Origin only — ignored for other providers.
+This is a global default. Per-repo config can override it via `providers.origin.draft_pull_requests`.
 
 ## Environment variables
 

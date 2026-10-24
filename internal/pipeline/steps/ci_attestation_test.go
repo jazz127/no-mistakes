@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -121,6 +122,7 @@ func TestRebindPipelineAttestationHead_OmitsPreviousLiveValidation(t *testing.T)
 		Name:     "user reaches the success screen",
 		Result:   types.ScenarioResultPass,
 		Live:     true,
+		Surface:  types.ScenarioSurfaceProduct,
 		Evidence: "checkout.png",
 	}}, types.TestVerdictGo)
 	steps := []*db.StepResult{{
@@ -149,6 +151,7 @@ func TestRebindPipelineAttestationWithSteps_UsesCurrentLiveValidation(t *testing
 		Name:     "old scenario",
 		Result:   types.ScenarioResultPass,
 		Live:     true,
+		Surface:  types.ScenarioSurfaceProduct,
 		Evidence: "old.png",
 	}}, types.TestVerdictGo)
 	original := buildPipelineAttestation([]*db.StepResult{{
@@ -159,7 +162,8 @@ func TestRebindPipelineAttestationWithSteps_UsesCurrentLiveValidation(t *testing
 	}}, nil, testPipelineHeadSHA)
 	newHead := strings.Repeat("ef", 20)
 	currentFindings := liveValidatedFindingsJSON(t, []types.TestScenario{
-		{Name: "live scenario", Result: types.ScenarioResultPass, Live: true, Evidence: "live.png"},
+		{Name: "live scenario", Result: types.ScenarioResultPass, Live: true, Surface: types.ScenarioSurfaceProduct,
+			Evidence: "live.png"},
 		{Name: "blocked scenario", Result: types.ScenarioResultUntested, Reason: "browser unavailable"},
 	}, types.TestVerdictInconclusive, newHead)
 	currentSteps := []*db.StepResult{{
@@ -376,6 +380,7 @@ func TestRestampPRAttestation_MissingReaderIsSkipped(t *testing.T) {
 }
 
 func TestCIStep_PublishRepairRebindsAttestationAcrossRepairPushes(t *testing.T) {
+	t.Parallel()
 	f := newCIRepairFixture(t, false, writeCIFix)
 	original := compliantPipelineBody(t, f.headSHA)
 	bodyFile := filepath.Join(t.TempDir(), "pr-body.md")
@@ -419,6 +424,7 @@ func TestCIStep_PublishRepairRebindsAttestationAcrossRepairPushes(t *testing.T) 
 }
 
 func TestCIStep_UnsettledRepairPushParksImmediately(t *testing.T) {
+	t.Parallel()
 	f := newCIRepairFixture(t, false, writeCIFix)
 	bodyFile := filepath.Join(t.TempDir(), "pr-body.md")
 	if err := os.WriteFile(bodyFile, []byte(compliantPipelineBody(t, f.headSHA)), 0o644); err != nil {
@@ -451,6 +457,7 @@ func TestCIStep_UnsettledRepairPushParksImmediately(t *testing.T) {
 }
 
 func TestCIStep_PublishRepairFailsWhenAttestationCannotSettle(t *testing.T) {
+	t.Parallel()
 	f := newCIRepairFixture(t, false, writeCIFix)
 	bodyFile := filepath.Join(t.TempDir(), "pr-body.md")
 	if err := os.WriteFile(bodyFile, []byte(compliantPipelineBody(t, f.headSHA)), 0o644); err != nil {
@@ -490,6 +497,7 @@ func TestCIStep_PublishRepairFailsWhenAttestationCannotSettle(t *testing.T) {
 // interaction. GitLab with an available host supports raw reads and restamping;
 // provider identity alone no longer causes the skip.
 func TestCIStep_PublishRepairSkipsAttestationForNonGitHubProvider(t *testing.T) {
+	t.Parallel()
 	f := newCIRepairFixture(t, false, writeCIFix)
 	gitlabPR := "https://gitlab.com/test/repo/-/merge_requests/42"
 	f.sctx.Repo.UpstreamURL = "https://gitlab.com/test/repo.git"
@@ -509,6 +517,7 @@ func TestCIStep_PublishRepairSkipsAttestationForNonGitHubProvider(t *testing.T) 
 }
 
 func TestCIStep_PublishRepairDoesNotMintAttestation(t *testing.T) {
+	t.Parallel()
 	f := newCIRepairFixture(t, false, writeCIFix)
 	const foreign = "a regular pull request with no pipeline section"
 	bodyFile := filepath.Join(t.TempDir(), "pr-body.md")
@@ -681,7 +690,7 @@ func TestPushStep_UnavailableSCMLeavesStaleAttestationFailingClosed(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(logData), "auth status") || strings.Contains(string(logData), "pr edit") {
+	if !strings.Contains(string(logData), "auth status") || strings.Contains(string(logData), "--method PATCH") {
 		t.Fatalf("expected an unavailable-host skip before any PR write:\n%s", logData)
 	}
 }
@@ -865,6 +874,9 @@ func TestPushStep_DoesNotMintAttestation(t *testing.T) {
 	setupGateMirror(t, sctx)
 	recordReviewApproval(t, sctx, newHead)
 
+	var logs []string
+	sctx.Log = func(line string) { logs = append(logs, line) }
+
 	bodyFile := filepath.Join(t.TempDir(), "pr-body.md")
 	if err := os.WriteFile(bodyFile, []byte(foreign), 0o644); err != nil {
 		t.Fatal(err)
@@ -882,7 +894,7 @@ func TestPushStep_DoesNotMintAttestation(t *testing.T) {
 		t.Fatalf("push step failed: %v", err)
 	}
 
-	if logData, err := os.ReadFile(logFile); err == nil && strings.Contains(string(logData), "pr edit") {
+	if logData, err := os.ReadFile(logFile); err == nil && strings.Contains(string(logData), "--method PATCH") {
 		t.Fatalf("must not write a PR body when no attestation was present:\n%s", logData)
 	}
 	body, err := os.ReadFile(bodyFile)
@@ -892,8 +904,58 @@ func TestPushStep_DoesNotMintAttestation(t *testing.T) {
 	if string(body) != foreign {
 		t.Fatal("body without an attestation must be left untouched")
 	}
+	if want := "skipping attestation rebind: pull request body carries no attestation marker"; !slices.Contains(logs, want) {
+		t.Fatalf("log = %q, want %q", logs, want)
+	}
 	if got, out := runVerifyPy(t, foreign, newHead); got != "failure" {
 		t.Fatalf("a PR not raised through no-mistakes must still fail, got %s\n%s", got, out)
+	}
+}
+
+// TestPushStep_NoPullRequestLogsTheSkippedAttestation pins the log line for
+// the skip where the PR lookup finds nothing and the run holds no PR URL: the
+// push still happens and no PR is written.
+func TestPushStep_NoPullRequestLogsTheSkippedAttestation(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir, baseSHA, _ := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	if err := os.WriteFile(filepath.Join(dir, "new-work.txt"), []byte("new work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "new work")
+	newHead := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, newHead, config.Commands{})
+	sctx.Repo.UpstreamURL = "https://github.com/test/repo"
+	sctx.Run.Branch = "refs/heads/feature"
+	setupGateMirror(t, sctx)
+	recordReviewApproval(t, sctx, newHead)
+
+	var logs []string
+	sctx.Log = func(line string) { logs = append(logs, line) }
+	logFile := filepath.Join(t.TempDir(), "gh.log")
+	sctx.Env = append(fakeCIGH(t, "OPEN", `[]`),
+		"FAKE_CLI_PR_LIST_JSON=[]",
+		"FAKE_CLI_LOG="+logFile,
+	)
+
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatalf("push step failed: %v", err)
+	}
+	if remoteHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); remoteHead != newHead {
+		t.Fatalf("remote head = %s, want %s", remoteHead, newHead)
+	}
+	if logData, err := os.ReadFile(logFile); err == nil && strings.Contains(string(logData), "--method PATCH") {
+		t.Fatalf("must not write a PR body when no PR exists:\n%s", logData)
+	}
+	if want := "skipping attestation write: no pull request found for this branch"; !slices.Contains(logs, want) {
+		t.Fatalf("log = %q, want %q", logs, want)
 	}
 }
 
@@ -942,5 +1004,23 @@ func TestPushStep_SkipsGhOnBaseBranch(t *testing.T) {
 
 	if logData, err := os.ReadFile(logFile); err == nil && len(logData) > 0 {
 		t.Fatalf("expected no gh invocation at all for a direct push to the base branch:\n%s", logData)
+	}
+}
+
+func TestLegacyCompletedGoKeepsLifecycleButPublishesConservatively(t *testing.T) {
+	t.Parallel()
+	findings := `{"findings":[],"summary":"","tested":["go test ./..."],"testing_summary":"legacy","scenarios":[{"name":"legacy scenario","result":"pass","live":true,"evidence":"output"}],"verdict":"go","tested_head_sha":"` + testPipelineHeadSHA + `"}`
+	step := &db.StepResult{
+		ID:           "test",
+		StepName:     types.StepTest,
+		Status:       types.StepStatusCompleted,
+		FindingsJSON: &findings,
+	}
+	if got := step.TestOverrideReason(); got != "" {
+		t.Fatalf("legacy clean Test reported an exception nobody approved: %q", got)
+	}
+	got := parsePipelineAttestationForTest(t, buildPipelineAttestation([]*db.StepResult{step}, nil, testPipelineHeadSHA)).LiveValidation
+	if got == nil || got.Verdict != types.TestVerdictInconclusive || got.Live != 0 || got.Total != 1 {
+		t.Fatalf("live validation = %+v, want inconclusive 0 of 1", got)
 	}
 }

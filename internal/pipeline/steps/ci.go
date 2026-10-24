@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -26,14 +27,26 @@ const (
 // producers and consumers agree on them.
 const (
 	ciChecksPassedMsg           = cimonitor.ChecksPassedMsg
+	ciChecksPassedCompleteMsg   = cimonitor.ChecksPassedCompleteMsg
 	ciNoChecksPassedMsg         = cimonitor.NoChecksPassedMsg
+	ciNoChecksPassedCompleteMsg = cimonitor.NoChecksPassedCompleteMsg
 	ciChecksRunningMsg          = cimonitor.ChecksRunningMsg
 	ciChecksAwaitingApprovalMsg = cimonitor.ChecksAwaitingApprovalMsg
+	ciBehindBaseMsg             = cimonitor.BehindBaseMsg
 )
 
 // CIStep monitors an open PR until it is merged, closed, or its configured idle
 // timeout elapses, and repairs CI failures through the executor's shared
-// findings machinery.
+// findings machinery. With ci.release_after_checks_pass it instead finishes the
+// run at the checks verdict.
+//
+// By default the green observation only clears the failure signal: the monitor
+// keeps watching the PR, so the run stays open and a later base-branch advance
+// is still repaired on its own. That is also why the recorded step duration
+// includes merge-waiting time. The opt-in release finishes the step there
+// instead, recording readiness and completing the run with the terminal
+// checks_passed status, which releases its worktree and lane and leaves the
+// merge decision to a human.
 //
 // Execute has the same shape as the review step's: when the executor
 // re-executes it as a fix round (sctx.Fixing), it first repairs the findings
@@ -64,6 +77,10 @@ type CIStep struct {
 	// must not re-arm the timeout. Overridable for testing; defaults to
 	// fetching the upstream default branch.
 	baseBranchTip func(context.Context) (string, bool)
+	// replayBase is the resolved base tip an in-flight rebase repair targets,
+	// set only for the duration of that repair's recording. recordRepair
+	// proves a pure replay against exactly this commit and nothing else.
+	replayBase string
 }
 
 // SetPollIntervalOverride is a test hook; production leaves the override unset.
@@ -207,11 +224,36 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 	if err != nil {
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
-	checks, err := host.GetChecks(ctx, &scm.PR{Number: prNumber, URL: prURL})
+	pr := &scm.PR{Number: prNumber, URL: prURL}
+	// The delivered commit is named on every read, not only when review-bot
+	// identity needs the head's rollup: a host that binds its reads to the
+	// named commit refuses one that is not evidence for it (GitLab's head
+	// pipeline can still point at an older commit), and an operator override
+	// must never be recorded from another commit's checks. Review-bot identity
+	// comes from that same head read, exactly as the polling loop names it.
+	pr.HeadSHA = sctx.Run.HeadSHA
+	checks, err := host.GetChecks(ctx, pr)
 	if err != nil {
+		if errors.Is(err, scm.ErrHeadChanged) {
+			// The provider answered; nothing it offered is evidence for the
+			// commit this run delivered. That is not a broken tool and not a
+			// clean pass: record it as an override naming the mismatch, the
+			// same refusal the polling loop waits on.
+			return fmt.Sprintf("live checks for %s are not for the commit being delivered: %v", prURL, err), nil
+		}
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
 	if allChecksPassed(checks) {
+		// A green head can still carry a green review bot's unresolved
+		// comments under ci.review_bot_comments: always; approving over
+		// them is an override, not a clean pass.
+		botFindings, err := s.greenReviewBotFindings(sctx, host, pr, checks)
+		if err != nil {
+			return fmt.Sprintf("could not verify review bot comments: %v", err), nil
+		}
+		if len(botFindings.Items) > 0 {
+			return fmt.Sprintf("live checks for %s passed but %s", prURL, botFindings.Summary), nil
+		}
 		return "", nil
 	}
 	if len(checks) == 0 {
@@ -346,7 +388,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 		retryRefusal = false
 		if repair.Revalidate {
-			return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
+			return &pipeline.StepOutcome{RestartFrom: repair.restartFrom()}, nil
 		}
 	}
 	baseBranch := effectivePRBaseBranch(sctx)
@@ -356,7 +398,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	if reader, ok := host.(scm.PRBaseBranchReader); ok {
 		if actual, readErr := reader.GetPRBaseBranch(ctx, pr); readErr == nil {
 			pr.BaseBranch = actual
-		} else if pluginContractBroken(readErr) {
+		} else if provider.IsPlugin() {
 			// A one-time read, not a poll: even a timeout fails closed,
 			// since falling back to the configured base could monitor or
 			// repair against a target the PR no longer has.
@@ -374,6 +416,28 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		if repairOutcome != nil {
 			return repairOutcome, nil
 		}
+		// A repair that recorded nothing (the fixer failed) must not fall
+		// through to monitoring the old published head while a carried review
+		// approval still awaits its restart at Test: green checks there would
+		// complete the run with the carried head never published. A commit the
+		// failed fixer still left on top of the carried head goes through
+		// recordRepair like any other, so it revokes the approval and restarts
+		// at Review; only the unchanged carried head restarts at Test.
+		pending, err := sctx.DB.RunTestRestartPending(sctx.Run.ID)
+		if err != nil {
+			return nil, err
+		}
+		if pending {
+			head, err := stepGitHeadSHA(sctx)
+			if err != nil {
+				return nil, fmt.Errorf("resolve head after failed CI fix: %w", err)
+			}
+			repair, err := s.recordRepair(sctx, head)
+			if err != nil {
+				return nil, err
+			}
+			return &pipeline.StepOutcome{RestartFrom: repair.restartFrom(), Findings: sctx.DeferredFindings}, nil
+		}
 	}
 
 	// CITimeout semantics: <0 (or "unlimited" in config) means never
@@ -385,7 +449,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		timeout = config.DefaultCITimeout
 	}
 
-	if unlimited {
+	releaseAfterChecksPass := ciReleaseAfterChecksPass(sctx)
+	if releaseAfterChecksPass {
+		sctx.Log(fmt.Sprintf("monitoring CI for PR #%s until every check is green...", prNumber))
+	} else if unlimited {
 		sctx.Log(fmt.Sprintf("monitoring CI for PR #%s (no timeout, until merged or closed)...", prNumber))
 	} else {
 		sctx.Log(fmt.Sprintf("monitoring CI for PR #%s (timeout: %s)...", prNumber, timeout))
@@ -411,11 +478,17 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	// poll-interval and grace-period pacing are unaffected by re-arming.
 	timeoutAnchor := started
 	lastBaseTip := ""
+	// behindBaseTip is the base tip a green, BEHIND PR was last seen at. The
+	// rebase repair fires only when the next poll still sees it green and
+	// BEHIND at that same tip, so a base that keeps moving does not spend a
+	// rebase and a full revalidation on a head that is stale again at once.
+	behindBaseTip := ""
 	mergeabilityBlockedReason := ""
 	var timeoutFailingChecks []scm.CheckTarget
 	timeoutMergeConflict := false
 	lastMonitorLog := ""
 	consecutiveCheckErrs := 0
+	consecutiveBotCommentErrs := 0
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
 		sctx.Log("CI timeout reached")
 		var outcome *pipeline.StepOutcome
@@ -457,6 +530,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		botCommentReadFailed := false
+		behindObserved := false
 
 		if !unlimited && now().Sub(timeoutAnchor) >= timeout {
 			return timeoutOutcome()
@@ -522,6 +597,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 
 		// Check mergeable state if the provider supports it
 		mergeConflict := false
+		mergeBehind := false
 		mergeabilityKnown := true
 		if host.Capabilities().MergeableState {
 			mergeState, mergeErr := host.GetMergeableState(ctx, pr)
@@ -535,6 +611,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				mergeabilityKnown = false
 			} else {
 				mergeConflict = mergeState.Conflict()
+				// Unless ci.rebase_behind opts in, BEHIND reads as MERGEABLE:
+				// the green PR reports checks-passed and waits for a human.
+				mergeBehind = mergeState.Behind() && sctx.Config != nil && sctx.Config.CI.RebaseBehind
 				mergeabilityKnown = mergeState.Resolved()
 				if !mergeabilityKnown {
 					sctx.Log(fmt.Sprintf("mergeable state still pending: %s", mergeState))
@@ -554,17 +633,32 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			return nil, err
 		}
 		if err != nil {
-			clearCIMonitorReady(sctx)
-			lastMonitorLog = ""
-			sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
-			consecutiveCheckErrs++
-			// A provider read that keeps failing (e.g. gh < v2.50 rejecting
-			// `gh pr checks --json`) must become an actionable stop, not an
-			// invisible spin to ci_timeout. The PR state check above returned
-			// already for merged/closed, so reaching here means the PR is open.
-			if consecutiveCheckErrs >= consecutiveCheckErrorLimit {
-				sctx.Log(fmt.Sprintf("CI checks could not be read %d consecutive times, parking for a decision", consecutiveCheckErrs))
-				return ciTerminalRepairOutcome(ciCheckReadFailureOutcome(err), Findings{}, sctx.DeferredFindings), nil
+			if errors.Is(err, scm.ErrHeadChanged) {
+				// The provider answered, but nothing it offered is evidence for
+				// the commit this run is delivering: no pipeline has registered
+				// for that commit yet, and the pipeline the merge request still
+				// points at belongs to an older one. That state resolves when
+				// the provider creates the pipeline, so it is a wait, not a
+				// read failure - counting it toward the consecutive-error limit
+				// would park the run after a few minutes telling the operator to
+				// check a CLI that answered fine. The idle timeout still bounds
+				// the wait, and the readiness signal is cleared because the
+				// previous observation was for a different head.
+				consecutiveCheckErrs = 0
+				lastMonitorLog = logCIMonitorStatus(sctx, fmt.Sprintf("%s%v", cimonitor.ChecksHeadWaitingPrefix, err), lastMonitorLog)
+			} else {
+				clearCIMonitorReady(sctx)
+				lastMonitorLog = ""
+				sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
+				consecutiveCheckErrs++
+				// A provider read that keeps failing (e.g. gh < v2.50 rejecting
+				// `gh pr checks --json`) must become an actionable stop, not an
+				// invisible spin to ci_timeout. The PR state check above returned
+				// already for merged/closed, so reaching here means the PR is open.
+				if consecutiveCheckErrs >= consecutiveCheckErrorLimit {
+					sctx.Log(fmt.Sprintf("CI checks could not be read %d consecutive times, parking for a decision", consecutiveCheckErrs))
+					return ciTerminalRepairOutcome(ciCheckReadFailureOutcome(err), Findings{}, sctx.DeferredFindings), nil
+				}
 			}
 		} else {
 			consecutiveCheckErrs = 0
@@ -711,12 +805,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					sctx.DeferredFindings = ""
 					s.observedCompletedAt = terminalFailureCompletionTimes(checks)
 					findings := ciObservationFindings(ciIssues{
+						provider:            host.Provider(),
 						checks:              checks,
 						failing:             failing,
 						unresolvedCancelled: unresolvedCancelled,
 						mergeConflict:       mergeConflict,
 						reruns:              s.transientReruns.used,
 						botComments:         reviewBotComments(sctx, host, pr, checks),
+						greenBots:           reviewBotCommentsAlways(sctx),
 					})
 					if hasAwaitingApprovalChecks(checks) {
 						sctx.Log(ciChecksAwaitingApprovalMsg)
@@ -740,23 +836,91 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// Applies even when no_ci is declared: registered checks are
 					// never waived.
 					lastMonitorLog = logCIMonitorStatus(sctx, ciWaitingMessage(checks), lastMonitorLog)
-				case len(checks) == 0:
+				case len(checks) == 0 && (sctx.Config == nil || !sctx.Config.NoCI):
 					// Empty forge results are ready ONLY with positive durable
 					// evidence from trusted default-branch config (no_ci: true).
 					// Without that declaration, keep waiting - delayed registration
 					// is common and must never look green. Elapsed time is not
 					// evidence; there is no grace-period promotion path.
-					if sctx.Config != nil && sctx.Config.NoCI {
-						sctx.DeferredFindings = ""
-						lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
-					} else {
+					clearCIMonitorReady(sctx)
+					lastMonitorLog = ""
+					sctx.Log("no CI checks reported yet, waiting for checks to register...")
+				case len(checks) == 0 || allChecksPassed(checks):
+					// Under ci.review_bot_comments: always, a review bot that
+					// concluded its check green, or has not registered one on
+					// this head yet, may still have left unresolved comments. They are read before the head is
+					// reported ready, and become the same ask-user findings a
+					// red bot check produces, so checks-passed is never reported
+					// over a comment nobody has looked at. A trusted no_ci head
+					// with no checks at all reads them the same way.
+					botFindings, botErr := s.greenReviewBotFindings(sctx, host, pr, checks)
+					if botErr != nil && pluginPollFailsStep(botErr) {
+						clearCIMonitorReady(sctx)
+						return nil, botErr
+					}
+					if botErr != nil {
 						clearCIMonitorReady(sctx)
 						lastMonitorLog = ""
-						sctx.Log("no CI checks reported yet, waiting for checks to register...")
+						botCommentReadFailed = true
+						consecutiveBotCommentErrs++
+						sctx.Log(fmt.Sprintf("warning: could not read review bot comments: %v", botErr))
+						if consecutiveBotCommentErrs >= consecutiveCheckErrorLimit {
+							sctx.Log(fmt.Sprintf("review bot comments could not be read %d consecutive times, parking for a decision", consecutiveBotCommentErrs))
+							return ciTerminalRepairOutcome(reviewBotCommentsReadFailureOutcome(botErr), Findings{}, sctx.DeferredFindings), nil
+						}
+						break
 					}
-				case allChecksPassed(checks):
+					if len(botFindings.Items) > 0 {
+						clearCIMonitorReady(sctx)
+						sctx.DeferredFindings = ""
+						s.observedCompletedAt = terminalFailureCompletionTimes(checks)
+						sctx.Log(fmt.Sprintf("issues detected: %s", botFindings.Summary))
+						return ciObservationOutcome(botFindings), nil
+					}
+					if mergeBehind {
+						// Green checks the forge still will not merge: the
+						// base requires branches to be up to date. The
+						// merge-conflict repair rebases onto the PR base.
+						behindObserved = true
+						tipCtx, cancel := context.WithTimeout(ctx, defaultBaseBranchTipResolveWindow)
+						tip, resolved := baseBranchTip(tipCtx)
+						cancel()
+						if !resolved || tip == "" || tip != behindBaseTip {
+							behindBaseTip = ""
+							if resolved {
+								behindBaseTip = tip
+							}
+							lastMonitorLog = logCIMonitorStatus(sctx, ciBehindBaseMsg, lastMonitorLog)
+							break
+						}
+						clearCIMonitorReady(sctx)
+						sctx.DeferredFindings = ""
+						findings := ciObservationFindings(ciIssues{provider: host.Provider(), checks: checks, behindBase: true})
+						sctx.Log(fmt.Sprintf("issues detected: %s", findings.Summary))
+						return ciObservationOutcome(findings), nil
+					}
 					sctx.DeferredFindings = ""
-					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
+					declaredNoCI := len(checks) == 0
+					// The default keeps watching: the green observation only
+					// clears the failure signal, as it always has, so the run
+					// stays open until the PR is merged, closed, or declined.
+					// ci.release_after_checks_pass opts into finishing here
+					// instead, which records the checks verdict and releases the
+					// run's worktree and lane.
+					if releaseAfterChecksPass {
+						completeMsg := ciChecksPassedCompleteMsg
+						if declaredNoCI {
+							completeMsg = ciNoChecksPassedCompleteMsg
+						}
+						sctx.Log(completeMsg)
+						sctx.Log("validation complete: releasing the run now; the PR is ready for a human to merge")
+						return &pipeline.StepOutcome{CIReadyNoCI: &declaredNoCI}, nil
+					}
+					passedMsg := ciChecksPassedMsg
+					if declaredNoCI {
+						passedMsg = ciNoChecksPassedMsg
+					}
+					lastMonitorLog = logCIMonitorStatus(sctx, passedMsg, lastMonitorLog)
 				default:
 					clearCIMonitorReady(sctx)
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
@@ -764,6 +928,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		}
 
+		if !botCommentReadFailed {
+			consecutiveBotCommentErrs = 0
+		}
+		if !behindObserved {
+			behindBaseTip = ""
+		}
 		if err := waitForPoll(); err != nil {
 			return nil, err
 		}
@@ -784,14 +954,31 @@ func ciWaitingMessage(checks []scm.Check) string {
 
 func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) string {
 	if message != previous {
-		ready := message == ciChecksPassedMsg || message == ciNoChecksPassedMsg
-		declaredNoCI := message == ciNoChecksPassedMsg
+		ready, declaredNoCI := ciReadyMessage(message)
 		if err := setCIMonitorReadiness(sctx, ready, declaredNoCI); err != nil {
 			sctx.Log(fmt.Sprintf("warning: could not persist CI readiness: %v", err))
 		}
 		sctx.Log(message)
 	}
 	return message
+}
+
+func ciReadyMessage(message string) (ready, declaredNoCI bool) {
+	switch message {
+	case ciChecksPassedMsg:
+		return true, false
+	case ciNoChecksPassedMsg:
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+// ciReleaseAfterChecksPass reports whether the operator opted into finishing the
+// run at the checks verdict. The default is off: the monitor keeps watching the
+// PR until it is merged or closed, exactly as it always has.
+func ciReleaseAfterChecksPass(sctx *pipeline.StepContext) bool {
+	return sctx != nil && sctx.Config != nil && sctx.Config.CI.ReleaseAfterChecksPass
 }
 
 func clearCIMonitorReady(sctx *pipeline.StepContext) {

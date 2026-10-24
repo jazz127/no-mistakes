@@ -250,6 +250,7 @@ func writeIntentScenario(t *testing.T) string {
         - name: "fakeagent: simulated end-to-end scenario"
           result: pass
           live: true
+          surface: product
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go

@@ -83,7 +83,7 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts, strict bool) (*Resu
 		return nil, fmt.Errorf("pi stdin pipe: %w", err)
 	}
 
-	started, err := startNativeAgentCommand(cmd, nativeAgentActivityObserver(opts, "pi"))
+	started, err := startNativeAgentCommand(cmd, nativeAgentActivityObserver(opts, "pi"), opts.RequireCompletedChildren)
 	if err != nil {
 		_ = stdin.Close()
 		return nil, fmt.Errorf("pi start: %w", err)
@@ -149,7 +149,7 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts, strict bool) (*Resu
 			if stderr != "" {
 				retErr = fmt.Errorf("%w: %s", retErr, stderr)
 			}
-			retErr = rejectStructuredOutput(retErr)
+			retErr = RejectStructuredOutput(retErr)
 			emitAgentExited(opts, "pi", pid, retErr)
 			return failedResult(pp.usage, pp.sessionID), retErr
 		}

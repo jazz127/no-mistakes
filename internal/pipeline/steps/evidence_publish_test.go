@@ -78,6 +78,7 @@ func testStepWithArtifacts(artifacts string) ([]*db.StepResult, map[string][]*db
 }
 
 func TestPublishRunEvidence_LandsOnOrphanBranchAndLinksFromThePRBody(t *testing.T) {
+	t.Parallel()
 	sctx, remote := newEvidencePublishContext(t, "feature/add-login")
 	writeRunEvidence(t, sctx, map[string]string{
 		"checkout.png": "\x89PNG binary",
@@ -135,6 +136,7 @@ func TestPublishRunEvidence_LandsOnOrphanBranchAndLinksFromThePRBody(t *testing.
 }
 
 func TestPublishRunEvidence_PercentEncodesEveryArtifactPathSegment(t *testing.T) {
+	t.Parallel()
 	sctx, remote := newEvidencePublishContext(t, "feature/add-login")
 	sctx.Config.Test.Evidence.Dir = "evidence archive #1 100%"
 	artifact := "capture #1 100%/checkout 100%.png"
@@ -158,6 +160,7 @@ func TestPublishRunEvidence_PercentEncodesEveryArtifactPathSegment(t *testing.T)
 }
 
 func TestPublishRunEvidence_UsesTheConfiguredBranchName(t *testing.T) {
+	t.Parallel()
 	sctx, remote := newEvidencePublishContext(t, "feature/add-login")
 	sctx.Config.Test.Evidence.Branch = "team/ci/evidence"
 	writeRunEvidence(t, sctx, map[string]string{"cli-run.txt": "it works\n"})
@@ -175,7 +178,73 @@ func TestPublishRunEvidence_UsesTheConfiguredBranchName(t *testing.T) {
 	}
 }
 
+func TestPublishRunEvidence_CommitSubject(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, template, want string
+	}{
+		{"default", "", "no-mistakes: evidence for feature/add-login (run %s)"},
+		{"configured", "chore(evidence): {{.Branch}} {{.RunID}}", "chore(evidence): feature/add-login %s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sctx, remote := newEvidencePublishContext(t, "feature/add-login")
+			sctx.Config.Test.Evidence.CommitMessage = tc.template
+			writeRunEvidence(t, sctx, map[string]string{"cli-run.txt": "it works\n"})
+
+			if links := publishRunEvidence(sctx); links == nil {
+				t.Fatal("expected evidence to be published")
+			}
+			got := gitCmd(t, remote, "log", "-1", "--format=%s", "refs/heads/no-mistakes/evidence")
+			if want := fmt.Sprintf(tc.want, sctx.Run.ID); got != want {
+				t.Fatalf("evidence commit subject = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestPublishRunEvidence_RejectsCommitSubjectInvalidForTheRun(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, branch, template string
+	}{
+		{
+			name:     "unsafe character from branch",
+			branch:   "feature/zero\u200bwidth",
+			template: "evidence: {{.Branch}}",
+		},
+		{
+			name:     "rendered subject exceeds byte limit",
+			branch:   strings.Repeat("long-segment/", 24) + "feature",
+			template: strings.Repeat("{{.Branch}}", 16),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			loaded, err := config.LoadRepoFromBytes([]byte(fmt.Sprintf("test:\n  evidence:\n    commit_message: %q\n", tc.template)))
+			if err != nil {
+				t.Fatalf("template must pass config-load validation: %v", err)
+			}
+
+			// Keep the fixture's checked-out ref short enough for Windows. The
+			// runtime branch value is the input whose expansion this test covers.
+			sctx, remote := newEvidencePublishContext(t, "feature/runtime-subject")
+			sctx.Run.Branch = tc.branch
+			sctx.Config.Test.Evidence.CommitMessage = *loaded.Test.Evidence.CommitMessage
+			writeRunEvidence(t, sctx, map[string]string{"cli-run.txt": "it works\n"})
+
+			if links := publishRunEvidence(sctx); links != nil {
+				t.Fatalf("expected runtime subject rejection to return nil links, got %+v", links)
+			}
+			if refs := gitCmd(t, remote, "for-each-ref", "--format=%(refname)"); refs != "refs/heads/main" {
+				t.Fatalf("runtime subject rejection changed remote refs: %q", refs)
+			}
+		})
+	}
+}
+
 func TestPublishRunEvidence_InvalidBranchNameFallsBackToLocalPaths(t *testing.T) {
+	t.Parallel()
 	sctx, remote := newEvidencePublishContext(t, "feature/add-login")
 	sctx.Config.Test.Evidence.Branch = "not a branch"
 	writeRunEvidence(t, sctx, map[string]string{"cli-run.txt": "it works\n"})
@@ -199,6 +268,7 @@ func TestPublishRunEvidence_InvalidBranchNameFallsBackToLocalPaths(t *testing.T)
 }
 
 func TestPublishRunEvidence_ProviderWithoutFileLinksPublishesNothing(t *testing.T) {
+	t.Parallel()
 	sctx, remote := newEvidencePublishContext(t, "feature/add-login")
 	sctx.Repo.UpstreamURL = "https://gitlab.com/example/widgets.git"
 	writeRunEvidence(t, sctx, map[string]string{"cli-run.txt": "it works\n"})
@@ -212,6 +282,7 @@ func TestPublishRunEvidence_ProviderWithoutFileLinksPublishesNothing(t *testing.
 }
 
 func TestPublishRunEvidence_DisabledDoesNotTouchTheRemote(t *testing.T) {
+	t.Parallel()
 	sctx, remote := newEvidencePublishContext(t, "feature/add-login")
 	sctx.Config.Test.Evidence.StoreInRepo = false
 	writeRunEvidence(t, sctx, map[string]string{"cli-run.txt": "it works\n"})
@@ -236,6 +307,7 @@ func TestPublishRunEvidence_DisabledDoesNotTouchTheRemote(t *testing.T) {
 // applies. Real test evidence beside it must still publish, so the assertion is
 // not simply "nothing was published".
 func TestPublishRunEvidence_NeverPublishesTheReviewConversation(t *testing.T) {
+	t.Parallel()
 	sctx, remote := newEvidencePublishContext(t, "feature/add-login")
 	writeRunEvidence(t, sctx, map[string]string{
 		"cli-run.txt": "it works\n",

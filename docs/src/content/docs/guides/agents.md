@@ -149,15 +149,18 @@ If your home directory consolidates `.claude` and `.agents` with symlinks, `init
 Re-run `no-mistakes init` after an upgrade to refresh that skill, including overwriting stale `SKILL.md` content from an older binary.
 Older versions vendored the skill into each initialized repo's `.claude/skills` and `.agents/skills`; those copies are no longer needed, and `init` prints a notice when it finds one so you can remove it.
 The skill drives `no-mistakes axi`, a non-interactive command surface that prints TOON to stdout and progress to stderr.
-When CI is ready - either its registered checks are green or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no registered checks - but the PR is still open, `axi run` and `axi respond` return `outcome: checks-passed` with a help line pointing at the PR instead of waiting for a human merge. An empty check result without that declaration is not ready; see the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for the readiness rules.
+When CI is ready - either its registered checks are green or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no registered checks - and known mergeability is clear, `axi run` and `axi respond` return `outcome: checks-passed` with a help line pointing at the PR instead of waiting for a human merge. An empty check result without that declaration is not ready; see the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for the readiness rules.
 That is a successful agent stopping point: report that the PR is ready and ask the user to review and merge it.
+By default the run stays active there and keeps monitoring the PR, so the agent runs no command and must never hand-rebase.
 Successful outcomes also instruct the agent to summarize the run for the user.
 When the pipeline applied fixes, successful outcomes include a `fixes` table listing each fix so the agent can acknowledge what it missed and the user can review them.
 
-If that PR later falls behind the default branch or hits a merge conflict - commonly because another PR merged first - the agent runs no command and must never hand-rebase.
-The CI monitor stays live in the background after checks pass, and when it sees an actual conflict it rebases onto the base, resolves it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push, so no agent or user action is needed.
-A PR that is merely behind but still clean needs nothing either, since the platform merges it.
+Under [`ci.release_after_checks_pass`](/no-mistakes/reference/repo-config/#cirelease_after_checks_pass) the run finishes at that verdict instead: `run.status` is `checks_passed`, the run released its worktree, and nothing is left watching the PR, so if that PR later falls behind the default branch or hits a merge conflict, the update is a fresh `no-mistakes axi run` on the updated head; this run will not rebase or re-push it. Everything below describes the default monitor.
+When that monitor sees an actual conflict it rebases onto the base, resolves it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push, so no agent or user action is needed.
+On GitHub, a clean PR whose base requires branches to be up to date (`mergeStateStatus: BEHIND`) still reports `checks-passed` and waits for a human to bring it up to date; only when the repository opts into [`ci.rebase_behind`](/no-mistakes/reference/repo-config/#cirebase_behind) does the monitor give it the same rebase, once its checks are green and the base has held still for one poll.
+A PR that is merely behind a base without that rule needs nothing either, since the platform merges it.
 The one exception is when that monitor is no longer running - the PR was closed, the run was aborted or superseded, it idle-timed-out, or its auto-fix attempts were exhausted - in which case see [`no-mistakes rerun`](/no-mistakes/reference/cli/#no-mistakes-rerun) for the restart conditions.
+A run that failed before Push only because an agent invocation failed - a provider error, a usage limit, or the agent process exiting - can instead continue from its failed step with [`no-mistakes axi retry --run <id>`](/no-mistakes/reference/cli/#no-mistakes-axi-retry); it refuses with the failed proof whenever continuing is not provably safe.
 The agent must not use `no-mistakes axi run` to refresh a still-active PR: after `checks-passed` it reattaches to the running monitor with HEAD unchanged and returns the monitor output without rebasing.
 
 In task-first mode, if the repo is on the default branch, the skill tells the agent to create a feature branch before committing because the gate validates committed history on a non-default branch.
@@ -173,14 +176,16 @@ no-mistakes axi sync
 no-mistakes axi sync --recover
 no-mistakes axi sync --adopt-published
 no-mistakes axi respond --action approve
+no-mistakes axi respond --run <id> --action approve
 no-mistakes axi logs --step review --full
 no-mistakes axi abort
 no-mistakes axi abort --run <id>
+no-mistakes axi retry --run <id>
 ```
 
 Before any post-pipeline local commit or fresh run, read `branch_sync` and follow its exact `next_action.command`.
 A `sync` action runs `no-mistakes axi sync` first.
-A `recover_custody` action is ordinary `no-mistakes axi sync --recover` to take a still-available preserved head, or `no-mistakes axi sync --recover --keep-local` when that head is unavailable and you are discarding the missing commits, or when a bound archive preserves divergent later work while custody returns at the reported required head; never substitute one action for the other. See [`no-mistakes rerun`](/no-mistakes/reference/cli/#no-mistakes-rerun) for the alternative validation path and its refusal conditions.
+A `recover_custody` action is ordinary `no-mistakes axi sync --recover` to take a still-available preserved head, or `no-mistakes axi sync --recover --keep-local` when that head is unavailable and you are discarding the missing commits, when the recorded head is missing and the exact local head is already published, or when a bound archive preserves divergent later work while custody returns at the reported required head; never substitute one action for the other. See [`no-mistakes rerun`](/no-mistakes/reference/cli/#no-mistakes-rerun) for the alternative validation path and its refusal conditions.
 A `recover_remote_rewritten` action is exact `no-mistakes axi sync --recover` after a terminal run whose push target was force-rewritten outside the pipeline: it anchors the superseded pipeline head and rebinds only the recorded push binding to the re-verified live head, and refuses `--keep-local`, a target or live head that changes during recovery, an unanchorable head, and a merged or closed PR. See [`no-mistakes axi sync`](/no-mistakes/reference/cli/#no-mistakes-axi-sync).
 An `adopt_published` action is `no-mistakes axi sync --adopt-published`: it verifies the configured push target already has the exact rebased local head, then updates only the stale gate lane. A target mismatch or target change refuses without replacing that lane.
 A `branch_sync.state` of `user_owned` means the run went terminal before changing the submitted head and cancellation released the branch: it is immediately usable and needs no sync action.
@@ -240,7 +245,7 @@ After no-mistakes starts one, it terminates any remaining child processes when t
 Step logs record their process lifecycle, including start and exit lines with the PID, and AXI status exposes that PID while the subprocess is still active.
 Persistent server agents (Rovo Dev and OpenCode) use their managed server lifecycle instead.
 
-Transient API and network failures, stochastic prose turn endings, transient tool-call or permission validation errors, and final-text parse failures whose remedy is a fresh turn (provider protocol residue after a complete object, or a split answer the parser could not fuse) are retried up to three times with exponential backoff. Provider quota and free-usage-limit errors are terminal, even when a backend marks them retryable. Retry messages are recorded as lifecycle activity for native subprocess agents, falling back to the streaming text path for direct callers that do not supply `OnLifecycle`.
+Transient API and network failures, stochastic prose turn endings, transient tool-call or permission validation errors, and final-text parse failures whose remedy is a fresh turn (provider protocol residue after a complete object, or a split answer the parser could not fuse) are retried up to three times with exponential backoff. Provider quota and free-usage-limit errors stop retries within that agent, even when a backend marks them retryable; see [quota-aware routing](/no-mistakes/reference/global-config/#quota_routing) for switching agents. A retry never extends the invocation's deadline: when the time left is shorter than the failed attempt took, the retry is skipped and the step fails with the original error. Retry messages are recorded as lifecycle activity for native subprocess agents, falling back to the streaming text path for direct callers that do not supply `OnLifecycle`.
 
 ## Intent extraction
 
@@ -293,7 +298,23 @@ Starts a persistent HTTP server (`acli rovodev serve`) on first use and reuses i
 
 ## OpenCode
 
-Starts a persistent HTTP server (`opencode serve`) on first use and reuses it across invocations. If a reused server refuses a connection, no-mistakes discards it and retries with a fresh server. Any `agent_args_override.opencode` flags are inserted before no-mistakes' managed serve flags; `opencode serve` exits with usage on an unknown flag, so a model flag does not belong there. Model and reasoning effort come from [`agent_config.opencode`](/no-mistakes/reference/global-config/#agent_config) and travel in the session message as `model` (from the `provider/model` form) and `variant`. Similar session lifecycle to Rovo Dev: create session, send message, stream SSE events until idle, delete session. Supports structured output by sending the `json_schema` descriptor at `info.format`, as required by OpenCode 1.17 and later. See the OpenCode adapter implementation (`internal/agent/opencode*.go`) for the authoritative tool-choice retry conditions, transient failure boundaries, and prompt-only fallback semantics. When native structured output is genuinely absent, it falls back to the common text fallback described above while allowing `null` for optional fields.
+Starts a persistent HTTP server (`opencode serve`) on first use and reuses it across invocations.
+The binary's major version selects the protocol before any session or prompt is created; OpenCode 1 and 2 are supported.
+Any `agent_args_override.opencode` flags are inserted before no-mistakes' managed serve flags; model flags do not belong there because `opencode serve` rejects them.
+Model and reasoning effort come from [`agent_config.opencode`](/no-mistakes/reference/global-config/#agent_config).
+
+OpenCode 2 runs with a private per-server credential and a parent-owned stdin lease (`serve --stdio`).
+The credential is used for health checks and API requests, never put in command arguments, and removed from the environment before OpenCode tools inherit it.
+Health is verified through `/api/info`, not the retired `/global/health` endpoint.
+Each invocation creates a fresh session at its own worktree location, selects the model and variant when creating that session, admits its prompt, waits for execution, and reads every page of projected messages.
+Live SSE events provide progress, but a disconnected or lagging stream never proves completion or absence of tool effects.
+The final message projection supplies the authoritative answer and per-step token usage.
+Because the V2 tool-using session API has no native JSON-schema format field, the schema is included in the prompt and the final text is validated with the common text fallback described above, including nullable optional fields.
+A provider failure never becomes a successful answer merely because it left valid-looking JSON behind.
+An admitted V2 execution is not automatically replayed after an uncertain or failed outcome; cancellation interrupts and deletes only the invocation's own session.
+
+OpenCode 1 retains its synchronous message API, `model`/`variant` message fields, native `info.format` JSON-schema output and existing tool-evidence-gated retry/fallback behavior.
+See `internal/agent/opencode*.go` for the authoritative version-specific contracts.
 
 ## Pi
 
@@ -307,7 +328,7 @@ This strict path needs Pi 0.82.0 or later (read from `pi --version`; a prereleas
 Pi applies `--no-tools` (`-nt`) and a `--tools` (`-t`) allowlist to extension tools too, so with either flag in `agent_args_override.pi` the model cannot see `no_mistakes_output`.
 Otherwise the invocation uses the prompt-inlined schema: the schema goes into the prompt and the final text response is validated with the common text fallback described above. A provider/model that refuses strict tools is retried once on that path and then stays on it for the agent's lifetime.
 The step log names which path each structured invocation ran.
-On the strict path, a run that ends without calling `no_mistakes_output` as its only final tool call is a structured-output rejection, so Review's bounded schema rerun applies.
+On the strict path, a run that ends without calling `no_mistakes_output` as its only final tool call is retried by the bounded invocation retry loop unless its stderr indicates authentication, access denial, or quota exhaustion; if retries exhaust, it remains a structured-output rejection, so Review's bounded schema rerun applies. A `pi exited: ...: fetch failed` error is retried with the same stderr exclusions; those failures stop retries within that agent.
 Either way the adapter validates the result against the same schema, keeping required fields and the existing nullable-optional-field contract unchanged.
 The extension is invocation-scoped and works with `--no-extensions`.
 Invocations without a schema retain the ordinary final-text path.

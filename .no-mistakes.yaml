@@ -39,3 +39,9 @@ document:
     stale test name or moved owner file); never add sections, facts, or
     pointers to them to close a documentation gap - missing content there is
     not a gap this step resolves.
+
+# The fork's house line is merge-commits-only: integrate a moved base (Rebase
+# step and CI merge-conflict repair alike) with a merge commit whose first
+# parent is the reviewed head, so publication stays a fast-forward of the PR.
+rebase:
+  strategy: merge

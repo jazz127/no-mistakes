@@ -47,7 +47,24 @@ Canonical Forgejo web base URL used for provider discovery and forgejo-axi comma
 | Type    | `URL`    |
 | Default | (none)   |
 
-Set this for every SSH origin, because an SSH remote does not identify the canonical Forgejo web scheme, port, or path prefix. Also set it when an HTTPS origin uses a self-hosted hostname other than `codeberg.org` or one containing `forgejo`. Recognized HTTPS origins are detected automatically, including non-default ports and path prefixes inferred from the origin. When set, the host and prefix must match the repository's upstream origin; credentials, query strings, and fragments are rejected.
+Set this for every SSH origin, because an SSH remote does not identify the canonical Forgejo web scheme, port, or path prefix. Also set it when an HTTPS origin uses a self-hosted hostname other than `codeberg.org` or one containing `forgejo`. Recognized HTTPS origins are detected automatically, including non-default ports and path prefixes inferred from the origin. When set, the host and prefix must match the repository's upstream origin - name the clone hostname with [`FORGEJO_SSH_DOMAIN`](#forgejo_ssh_domain) when the instance serves SSH from a different host; credentials, query strings, and fragments are rejected.
+
+## `FORGEJO_SSH_DOMAIN`
+
+Hostname a Forgejo instance publishes in SSH clone URLs when it differs from the `FORGEJO_BASE_URL` host.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
+
+Set this to the instance's own `SSH_DOMAIN` value when Forgejo serves SSH from a hostname other than its web host, so an origin such as `git@ssh.forgejo.example:octo/widgets.git` is still recognized as that instance.
+
+Give a bare ASCII hostname or IP address, with an optional port that is ignored, because an instance's SSH clone port varies independently of its hostname. Hostname labels hold letters, digits, hyphens, and underscores, with a hyphen or underscore never first or last in a label, and an IPv6 address is bracketed (`[2001:db8::1]`). Any other value is treated as unset: a scheme, path, credentials, query string, or fragment, and also a name that could never match an origin, such as a wildcard or a trailing dot. no-mistakes never echoes a rejected value back into a log or an error, because the setting can hold a pasted credential.
+
+The variable only widens which SSH origins belong to the instance `FORGEJO_BASE_URL` already names, so it does nothing while that variable is unset or invalid. The upstream path prefix must still match, and HTTPS origins are unaffected. GitHub, GitLab, Bitbucket, and Azure DevOps hosts, plus any host configured in `glab`, `gh`, or `tea`, are all matched before the declared domain; against the remaining hostname guesses, the declared domain carries exactly the weight a `FORGEJO_BASE_URL` match already carries.
+
+If you worked around a split host by adding a `tea` login for it, delete that login when you set this variable. Because tea's configured hosts are matched first, a login whose `url` host or `ssh_host` equals the origin's host keeps the repository on the Gitea provider: the PR and CI steps keep running through `tea` instead of forgejo-axi, and where `tea` is not installed or not logged in, the PR step is skipped. Find the login with `tea logins list` and remove it with `tea logins delete <name>` (on tea 1.0: `tea auth status` and `tea auth logout --host <url>`).
 
 ## `FORGEJO_TOKEN_<HOST_KEY>`
 
@@ -92,6 +109,14 @@ Path to a replacement CA trust bundle used by forgejo-axi for HTTPS requests.
 | Default | (none)   |
 
 This replaces rather than appends to the platform trust store. See [Provider Integration](/no-mistakes/guides/provider-integration/#forgejo) for provider setup.
+
+## `NO_MISTAKES_FINDINGS_FILE`
+
+Absolute path to the empty JSON report file supplied to each repository [gate command](/no-mistakes/reference/repo-config/#structured-findings).
+
+This is a command-child variable, not a daemon setting. no-mistakes creates a fresh file outside the worktree before every gate command and removes it after reading the result. Commands can write `{"findings":[...]}` using the existing finding shape to report stable finding IDs and locations. Commands that leave it empty retain their exit-code-only behavior.
+
+See the [gate contract](/no-mistakes/reference/repo-config/#structured-findings) for the report schema, limits, verdicts, and approval behavior.
 
 ## `NO_MISTAKES_BITBUCKET_EMAIL`
 
@@ -222,9 +247,20 @@ Directory holding gh's `hosts.yml`, consulted when detecting self-hosted GitHub 
 
 When the upstream hostname is not `github.com`, no-mistakes reads gh's configured hosts from `$GH_CONFIG_DIR/hosts.yml` to decide whether the host is a GitHub Enterprise instance. It takes precedence over `XDG_CONFIG_HOME`. A selected [`forge_profiles`](/no-mistakes/reference/global-config/#forge_profiles) entry overrides this variable for that run and removes `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GH_HOST`, and `GH_REPO` from all child processes. See [Provider Integration](/no-mistakes/guides/provider-integration/#self-hosted-githubgitlab).
 
+## `TEA_CONFIG_DIR`
+
+Directory holding tea 1.0's `hosts.yml`, consulted when detecting self-hosted Gitea.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
+
+tea 1.0 ([gitea/tea#1126](https://gitea.com/gitea/tea/pulls/1126)) keeps its instances in `$TEA_CONFIG_DIR/hosts.yml`, and no-mistakes reads the same file to match the upstream host to an instance URL or `ssh_host`. It takes precedence over `XDG_CONFIG_HOME`. tea 0.x ignores it. See [Provider Integration](/no-mistakes/guides/provider-integration/#self-hosted-gitea).
+
 ## `XDG_CONFIG_HOME`
 
-Config directory used to locate glab's `config.yml` for self-hosted GitLab detection, gh's `hosts.yml` for self-hosted GitHub Enterprise detection, and tea's `config.yml` for Gitea detection.
+Config directory used to locate glab's `config.yml` for self-hosted GitLab detection, gh's `hosts.yml` for self-hosted GitHub Enterprise detection, and tea's `config.yml` (tea 0.x) and `hosts.yml` (tea 1.0) for Gitea detection.
 
 |         |             |
 | ------- | ----------- |
@@ -233,7 +269,7 @@ Config directory used to locate glab's `config.yml` for self-hosted GitLab detec
 
 When `GLAB_CONFIG_DIR` is unset, no-mistakes looks for glab's configured hosts at `$XDG_CONFIG_HOME/glab-cli/config.yml`, falling back to `~/.config/glab-cli/config.yml` when `XDG_CONFIG_HOME` is unset.
 When `GH_CONFIG_DIR` is unset, no-mistakes looks for gh's configured hosts at `$XDG_CONFIG_HOME/gh/hosts.yml`, falling back to `~/.config/gh/hosts.yml` when `XDG_CONFIG_HOME` is unset.
-tea has no CLI-specific override env var (unlike `GLAB_CONFIG_DIR`/`GH_CONFIG_DIR`); no-mistakes always looks for its configured logins at `$XDG_CONFIG_HOME/tea/config.yml`, falling back to `~/.config/tea/config.yml` when `XDG_CONFIG_HOME` is unset. See [Provider Integration](/no-mistakes/guides/provider-integration/#self-hosted-gitea).
+tea 0.x has no CLI-specific override env var (unlike `GLAB_CONFIG_DIR`/`GH_CONFIG_DIR`); no-mistakes always looks for its configured logins at `$XDG_CONFIG_HOME/tea/config.yml`, falling back to `~/.config/tea/config.yml` when `XDG_CONFIG_HOME` is unset. When `TEA_CONFIG_DIR` is unset, tea 1.0's configured instances are read from `hosts.yml` in that same directory. See [Provider Integration](/no-mistakes/guides/provider-integration/#self-hosted-gitea).
 
 ## `COMPACT_ADVISER_DISABLE`
 
@@ -268,11 +304,11 @@ Override or enable the telemetry website ID.
 
 When set, telemetry uses this website ID at runtime. If it is unset in a dev build, `no-mistakes` also checks a repo-local `.env` file for `NO_MISTAKES_UMAMI_WEBSITE_ID`. If no runtime value is found, it falls back to any website ID embedded at build time.
 
-When telemetry is enabled, `no-mistakes` sends command, run, approval, fix, and wizard events, completed step events with `awaiting_approval`, `fix_review`, or `failed` status, and pageviews for the human surfaces `/wizard` and `/tui` and the state-changing agent surfaces `/axi/run`, `/axi/respond`, and `/axi/abort` to Umami.
+When telemetry is enabled, `no-mistakes` sends command, run, approval, fix, and wizard events, completed step events with `awaiting_approval`, `fix_review`, or `failed` status, and pageviews for the human surfaces `/wizard` and `/tui` and the state-changing agent surfaces `/axi/run`, `/axi/respond`, `/axi/abort`, and `/axi/retry` to Umami.
 Mutation pageviews are sent alongside command events, so command status and duration remain available.
 They include only flag-derived context: `/axi/run` records booleans such as whether `--yes` or `--skip` was supplied and whether explicit intent was supplied through any [intent input transport](/no-mistakes/reference/cli/#intent-input); `/axi/respond` records the sanitized action and whether `--yes` was present. The intent boolean does not distinguish text, file, and stdin input, and intent input rejected by the CLI resolver emits no `axi-run` command event or pageview.
 
-Read-only surfaces (`axi` home, `axi status`, `axi logs`, `status`, `runs`) emit no telemetry at all, so agent status polling cannot flood remote analytics. Mutation surfaces (`axi run`, `axi respond`, `axi abort`, run lifecycle, approvals, and fixes) stay full-fidelity.
+Read-only surfaces (`axi` home, `axi status`, `axi logs`, `status`, `runs`) emit no telemetry at all, so agent status polling cannot flood remote analytics. Mutation surfaces (`axi run`, `axi respond`, `axi abort`, `axi retry`, run lifecycle, approvals, and fixes) stay full-fidelity.
 Each explicit human CLI, AXI, or TUI branch-sync check/apply attempt emits one command event and no additional pageview.
 Its fields are bounded enums and booleans only: surface, mode, state, relation, target kind, pipeline phase, PR state, result, refusal reason, dirty state, and duration.
 It never sends a SHA, run ID, path, branch name, URL, remote name, or command argument.
@@ -283,6 +319,8 @@ Everything sent remotely is low-cardinality: command names, statuses, durations,
 Run IDs, repository paths, branch names, session identities, prompts, model outputs, diffs, and per-invocation performance records are never sent.
 Repository-declared [gate](/no-mistakes/reference/repo-config/#gates) labels stay local. Remote step, approval, fix, and failed-step fields record them as the fixed token `gate`.
 
+[Quota-aware routing](/no-mistakes/reference/global-config/#quota_routing) records candidates, quota evidence, the chosen order, and mid-run switches in `runs.quota_routing` in the local state database (`<NM_HOME>/state.sqlite`). These records are never sent in remote telemetry.
+
 Detailed performance evidence stays on the machine in the local state database (`<NM_HOME>/state.sqlite`): one `agent_invocations` row per agent invocation, plus each run's accumulated parked-at-gate time.
 Each row records run and step identity, purpose (such as review/review-fix/housekeeping), the reported model and its provider, the cold/started/resumed/fallback session mode, a truncated session-identity hash, timestamps, duration, exit status, and failure category, alongside the session-fidelity metrics below.
 It never stores prompts, model outputs, diffs, raw command arguments, secret values, or credentials - only bounded counts, low-cardinality categories, and durations.
@@ -291,6 +329,7 @@ Token counts and the additive session-fidelity fields are nullable and read back
 A recorded `0` means the adapter reported zero; it is distinct from unknown.
 
 - Token detail: `input_tokens`/`output_tokens`/`cache_read_tokens` (adapter counters, cumulative across a resumed session for codex; per-invocation for pi; unknown when the adapter did not report usage). Claude, Pi, and OpenCode normalize their disjoint provider input buckets into total input, including cache reads and reported cache creation. Pipeline `fresh_input_tokens` remains input minus cache reads, including reported cache creation; [eval token accounting](/no-mistakes/reference/eval/#report-results) separates cache writes as well. Other fields are `cache_creation_tokens` (unknown when the provider does not surface it), `reasoning_tokens`, and `delta_input_tokens`/`delta_output_tokens`/`delta_cache_read_tokens` (the correct per-round amounts, so a resumed session's cumulative counter is never mistaken for one round's usage).
+  OpenCode 2 adds its separately reported reasoning count to total output tokens and also preserves it as `reasoning_tokens`; an absent reasoning count remains unknown.
 - Activity: `model_roundtrips` (a proxy for productive model turns), `tool_calls`, and a bounded tool-category histogram (`tool_wait_calls`, `tool_test_lint_calls`, `tool_edit_calls`, `tool_read_calls`, `tool_git_calls`, `tool_other_calls`); a compound command counts once per sub-command, so the histogram can sum higher than `tool_calls`.
 - Timing split: `subprocess_wait_ms` is the wall-clock spent inside tool subprocesses; model/reasoning time is the invocation duration minus it, clamped at zero.
 - Context: `workload_files`/`workload_lines` (bounded change size), `finding_count` (findings in the structured output), and `fallback_reason` (why a failed resume forced a fresh session, one of transient/parse/exit/spawn/unsupported/other).

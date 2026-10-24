@@ -141,26 +141,15 @@ func IngestPostPRMiss(ctx context.Context, store *Store, p *paths.Paths, databas
 }
 
 func lastGreenReviewRound(database *db.DB, runID string) (*db.StepRound, error) {
-	steps, err := database.GetStepsByRun(runID)
+	_, rounds, reviewStep, err := loadReviewRounds(database, runID)
 	if err != nil {
-		return nil, fmt.Errorf("read source steps: %w", err)
-	}
-	var reviewStep *db.StepResult
-	for _, step := range steps {
-		if step.StepName == types.StepReview {
-			reviewStep = step
-			break
-		}
+		return nil, err
 	}
 	if reviewStep == nil {
 		return nil, fmt.Errorf("%w: run %q has no review step", ErrNoCapturableReview, runID)
 	}
 	if reviewStep.Status != types.StepStatusCompleted {
 		return nil, fmt.Errorf("%w: review step status is %s", ErrReviewDidNotPassGreen, reviewStep.Status)
-	}
-	rounds, err := database.GetRoundsByStep(reviewStep.ID)
-	if err != nil {
-		return nil, fmt.Errorf("read review rounds: %w", err)
 	}
 	var last *db.StepRound
 	for _, round := range rounds {

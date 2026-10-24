@@ -146,7 +146,7 @@ func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.Ste
 			// worth holding: it survives any future reordering of this section
 			// and is what the regression asserts. The real attestation is
 			// emitted separately by buildPipelineAttestation and is untouched.
-			detailBlocks = append(detailBlocks, neutralizeAttestationMarkers(detail))
+			detailBlocks = append(detailBlocks, neutralizeAttestationMarkers(provider, detail))
 		}
 	}
 
@@ -203,9 +203,11 @@ func newPipelineAttestation(steps []*db.StepResult, rounds map[string][]*db.Step
 			Status: sr.Status,
 		}
 		if sr.StepName == types.StepTest && sr.OverrideReason != nil {
-			item.OverrideReason = strings.TrimSpace(*sr.OverrideReason)
+			// Free text: JSON would write a control byte as \u00XX, which the
+			// publication boundary rewrites into a form that is not valid JSON.
+			item.OverrideReason = neutralizePRControls(strings.TrimSpace(*sr.OverrideReason))
 			if item.OverrideReason != "" {
-				attestation.AllowTestCommandOverride = strings.TrimSpace(policy.AllowTestCommandOverride)
+				attestation.AllowTestCommandOverride = neutralizePRControls(strings.TrimSpace(policy.AllowTestCommandOverride))
 			}
 		}
 		attestation.Steps = append(attestation.Steps, item)
@@ -248,7 +250,7 @@ func attestedLiveValidation(steps []*db.StepResult, rounds map[string][]*db.Step
 			}
 			live, total := types.LiveScenarioCounts(findings.Scenarios)
 			return &pipelineAttestationLiveValidation{
-				Verdict: findings.Verdict,
+				Verdict: types.LiveValidationVerdict(findings.Scenarios, findings.Verdict),
 				Live:    live,
 				Total:   total,
 			}
@@ -429,12 +431,19 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 		}
 		renderState := testingArtifactRenderState{remainingEmbeddedBytes: maxEmbeddedArtifactsTotalBytes}
 		previousArtifact := ""
+		previousAttachment := false
 		for _, artifact := range artifacts {
 			rendered := renderTestingArtifact(artifact, opts, &renderState)
 			if rendered == "" {
 				continue
 			}
+			// A compact block with an uploaded attachment always starts with
+			// it. GitHub plays a bare video URL inline only when the URL is a
+			// paragraph by itself, so the block gets a blank line on both sides.
+			attachment := opts.compactArtifacts && opts.attachmentURL(artifact) != ""
 			if needsArtifactBlockSeparator(previousArtifact, rendered) {
+				b.WriteString("\n")
+			} else if (attachment || previousAttachment) && !strings.HasSuffix(b.String(), "\n\n") {
 				b.WriteString("\n")
 			}
 			b.WriteString(rendered)
@@ -442,10 +451,14 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 				b.WriteString("\n")
 			}
 			previousArtifact = rendered
+			previousAttachment = attachment
 		}
 		if outcome := buildTestingOutcomeLine(line, stepRounds); shouldRenderTestingOutcome(opts, wroteSummary, outcome) {
-			b.WriteString("- ")
-			b.WriteString(outcome)
+			outcomeLine := "- " + outcome
+			if needsArtifactBlockSeparator(previousArtifact, outcomeLine) || previousAttachment {
+				b.WriteString("\n")
+			}
+			b.WriteString(outcomeLine)
 			b.WriteString("\n")
 		}
 
@@ -486,13 +499,9 @@ func collectConfiguredTestModes(sr *db.StepResult, rounds []*db.StepRound) []str
 }
 
 func needsArtifactBlockSeparator(previous, current string) bool {
-	previous = strings.TrimSpace(previous)
-	current = strings.TrimSpace(current)
-	previousIsDetails := strings.HasPrefix(previous, "<details>")
-	currentIsDetails := strings.HasPrefix(current, "<details>")
-	previousIsBullet := strings.HasPrefix(previous, "- Evidence:")
-	currentIsBullet := strings.HasPrefix(current, "- Evidence:")
-	return previousIsDetails && currentIsBullet || previousIsBullet && currentIsDetails
+	previousEndsDetails := strings.HasSuffix(strings.TrimSpace(previous), "</details>")
+	currentStartsDetails := strings.HasPrefix(strings.TrimSpace(current), "<details>")
+	return previousEndsDetails != currentStartsDetails
 }
 
 func shouldRenderTestingOutcome(opts testingSummaryOptions, wroteSummary bool, outcome string) bool {
@@ -892,7 +901,7 @@ func readEmbeddedArtifactText(fsPath string) (string, error) {
 		if err != nil || !looksLikeTextArtifact(data) {
 			return "", err
 		}
-		return string(data), nil
+		return neutralizePRControls(string(data)), nil
 	}
 
 	file, err := os.Open(fsPath)
@@ -917,7 +926,7 @@ func readEmbeddedArtifactText(fsPath string) (string, error) {
 		return "", nil
 	}
 	omitted := info.Size() - int64(len(head)+len(tail))
-	return string(head) + fmt.Sprintf("\n\n... [%d bytes truncated] ...\n\n", omitted) + string(tail), nil
+	return neutralizePRControls(string(head) + fmt.Sprintf("\n\n... [%d bytes truncated] ...\n\n", omitted) + string(tail)), nil
 }
 
 func looksLikeTextArtifact(data []byte) bool {
@@ -1673,10 +1682,18 @@ func escapePipelineFoldMarkers(s string) string {
 // first marker in the body to the PR head. It also breaks copied PR-appendix
 // ownership markers (e.g. Testing evidence quoting a templated body): a raw
 // pair in an ordinary body makes every later restamp refuse it as ambiguous.
-// And it neutralizes closing references (neutralizeClosingReferences), since
-// every PR-body site that generates text passes through here.
-func neutralizeAttestationMarkers(s string) string {
-	return neutralizeClosingReferences(escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix)))
+// And it neutralizes closing references in the provider's own grammar
+// (closingGrammarFor), since every PR-body site that generates text passes
+// through here - the grammar has to travel with the text, because GitLab
+// resolves a reference inside a code block where GitHub does not.
+//
+// Control characters are cleaned first: the publication boundary strips them
+// again, and a terminal escape hidden inside a marker or closing keyword would
+// otherwise hide it from these escapes and become live once it is removed.
+func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
+	s = neutralizePRControls(s)
+	escaped := escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix))
+	return closingGrammarFor(provider).neutralize(escaped)
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {
