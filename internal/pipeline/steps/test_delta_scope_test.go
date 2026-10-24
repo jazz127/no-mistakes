@@ -10,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -58,6 +59,88 @@ func TestConfiguredTestCommandReceivesModeAndSince(t *testing.T) {
 			t.Errorf("%s environment = %q, want %q", tc.mode, got, tc.want)
 		}
 	}
+}
+
+// The environment contract is the oracle: initial/full, changed-head/delta
+// since the last executed head, and one final/full. The real shell's receipt
+// rejects stale inherited variables, wrong delta anchors, and duplicate full
+// executions. Only the evidence-agent response is simulated.
+func TestConfiguredTestCommandLifecycle(t *testing.T) {
+	dir, baseSHA, firstHead := setupGitRepo(t)
+	receipt := filepath.Join(t.TempDir(), "commands.txt")
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if opts.Purpose == "test-fix" {
+			return &agent.Result{Output: json.RawMessage(`{"summary":"No changes applied"}`)}, nil
+		}
+		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"Command environment integration test","tested":["configured shell command"],"testing_summary":"Mode contract exercised with a simulated evidence agent","artifacts":[],"scenarios":[{"name":"evidence agent boundary","result":"untested","live":false,"surface":"simulated","evidence":"mockAgent","reason":"This integration test substitutes only the evidence agent"}],"verdict":"inconclusive"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, firstHead, config.Commands{
+		Test: `printf '%s|%s|%s\n' "$NO_MISTAKES_TEST_MODE" "${NO_MISTAKES_TEST_SINCE-unset}" "$(git rev-parse HEAD)" >> "$MODE_RECEIPT"`,
+	})
+	sctx.Env = []string{"MODE_RECEIPT=" + receipt, "NO_MISTAKES_TEST_MODE=inherited", "NO_MISTAKES_TEST_SINCE=stale-inherited-head"}
+	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = sr.ID
+	execute := func(wantRan bool) {
+		t.Helper()
+		outcome, err := (&TestStep{}).Execute(sctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		findings, err := types.ParseFindingsJSON(outcome.Findings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if findings.TestCommandRan != wantRan || !findings.TestCommandPassed {
+			t.Fatalf("command receipt = ran %t, passed %t; want ran %t and passed", findings.TestCommandRan, findings.TestCommandPassed, wantRan)
+		}
+		recordTestModeRound(t, sctx, sr.ID, findings)
+		sctx.PreviousFindings = outcome.Findings
+	}
+	advance := func(message string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte(message+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitCmd(t, dir, "add", "feature.txt")
+		gitCmd(t, dir, "commit", "-m", message)
+		head := gitCmd(t, dir, "rev-parse", "HEAD")
+		if err := recordAgentFixHead(sctx, types.StepTest, head); err != nil {
+			t.Fatal(err)
+		}
+		return head
+	}
+	execute(true)
+	execute(false)
+	secondHead := advance("review repair")
+	sctx.Fixing = true
+	execute(true)
+	finalHead := advance("post-test correction")
+	sctx.Fixing = false
+	execute(true)
+	sctx.ForceFullTest = true
+	execute(true)
+	execute(false)
+	got, err := os.ReadFile(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "full|unset|" + firstHead + "\n" +
+		"delta|" + firstHead + "|" + secondHead + "\n" +
+		"delta|" + secondHead + "|" + finalHead + "\n" +
+		"full|unset|" + finalHead + "\n"
+	if string(got) != want {
+		t.Fatalf("actual shell command invocations:\n%s\nwant:\n%s", got, want)
+	}
+	t.Logf("Actual configured-command receipts (mode|since|HEAD):\n%s", got)
+	rounds, err := sctx.DB.GetRoundsByStep(sr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	md := BuildTestingSummaryForPR([]*db.StepResult{sr}, map[string][]*db.StepRound{sr.ID: rounds}, "https://github.com/example/disposable", finalHead, dir, "", nil)
+	t.Logf("Generated PR Testing markdown from persisted receipts (simulated evidence agent):\n%s", md)
 }
 
 func TestConfiguredTestRunModeReusesFullPassOnSameHead(t *testing.T) {
@@ -151,6 +234,25 @@ func TestBaseAttributionTestEnvironmentIsAlwaysFull(t *testing.T) {
 	if mode != "full" || since != "" {
 		t.Fatalf("base attribution environment = (%q, %q), want (full, unset)", mode, since)
 	}
+}
+
+func TestBaseAttributionCommandReceivesFullMode(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = []string{"NO_MISTAKES_TEST_MODE=delta", "NO_MISTAKES_TEST_SINCE=stale-head"}
+	output, code, err := runTestCommandOnBase(sctx, `printf '%s|%s|%s\n' "$NO_MISTAKES_TEST_MODE" "${NO_MISTAKES_TEST_SINCE-unset}" "$(git rev-parse HEAD)"`, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Base attribution must execute the full command at the actual base,
+	// independently of the environment inherited from a delta head run.
+	if code != 0 || strings.TrimSpace(output) != "full|unset|"+baseSHA {
+		t.Fatalf("base command: code=%d output=%q; want full|unset|%s", code, output, baseSHA)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("base attribution moved the run head: got %s, want %s", got, headSHA)
+	}
+	t.Logf("Actual base command receipt (mode|since|HEAD): %s", strings.TrimSpace(output))
 }
 
 func TestConfiguredTestTimeoutReceiptsDoNotCertifyCommandHistory(t *testing.T) {
