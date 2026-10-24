@@ -198,7 +198,7 @@ The repository owns the selector and its mapping from changed files to tests. It
 
 ## `NO_MISTAKES_TEST_SINCE`
 
-The last tested commit recorded by a usable Test round, exported to `commands.test` only in delta mode. It is unset in full mode. The pipeline replaces inherited values of both test variables for this command; these exports do not apply to `commands.prepare`, machine-local additional checks, or evidence-agent invocations.
+The last tested commit recorded by a usable Test round for the currently configured command, exported to `commands.test` only in delta mode. It is unset in full mode. The pipeline replaces inherited values of both test variables for this command; these exports do not apply to `commands.prepare`, machine-local additional checks, or evidence-agent invocations.
 
 The selector must fall back to the full selected suite when this commit is missing, unknown, or unreachable. The pipeline supplies the commit, while the repository determines which tests cover the changes since it.
 
