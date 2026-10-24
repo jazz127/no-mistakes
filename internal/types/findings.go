@@ -385,22 +385,26 @@ type Findings struct {
 }
 
 type findingsWire struct {
-	Items               []Finding            `json:"findings"`
-	Legacy              []Finding            `json:"items"`
-	Summary             string               `json:"summary"`
-	ReviewedPaths       []string             `json:"reviewed_paths"`
+	Items               []Finding          `json:"findings"`
+	Legacy              []Finding          `json:"items"`
+	Summary             string             `json:"summary"`
+	ReviewedPaths       []string           `json:"reviewed_paths"`
+	WithdrawnFindings   []WithdrawnFinding `json:"withdrawn_findings"`
+	Tested              []string           `json:"tested"`
+	TestingSummary      string             `json:"testing_summary"`
+	Artifacts           []TestArtifact     `json:"artifacts"`
+	Scenarios           []TestScenario     `json:"scenarios"`
+	Verdict             string             `json:"verdict"`
+	TestedHeadSHA       string             `json:"tested_head_sha"`
+	UnvalidatedSinceSHA string             `json:"unvalidated_since_sha"`
+	RiskLevel           string             `json:"risk_level"`
+	RiskRationale       string             `json:"risk_rationale"`
+	RiskScope           string             `json:"risk_scope"`
+	reviewCoverageWire
+}
+
+type reviewCoverageWire struct {
 	ReviewCoverageScope *ReviewCoverageScope `json:"review_coverage_scope"`
-	WithdrawnFindings   []WithdrawnFinding   `json:"withdrawn_findings"`
-	Tested              []string             `json:"tested"`
-	TestingSummary      string               `json:"testing_summary"`
-	Artifacts           []TestArtifact       `json:"artifacts"`
-	Scenarios           []TestScenario       `json:"scenarios"`
-	Verdict             string               `json:"verdict"`
-	TestedHeadSHA       string               `json:"tested_head_sha"`
-	UnvalidatedSinceSHA string               `json:"unvalidated_since_sha"`
-	RiskLevel           string               `json:"risk_level"`
-	RiskRationale       string               `json:"risk_rationale"`
-	RiskScope           string               `json:"risk_scope"`
 }
 
 // ParseFindingsJSON decodes findings JSON, accepting current and legacy item
