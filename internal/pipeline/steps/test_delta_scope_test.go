@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -148,6 +150,264 @@ func TestBaseAttributionTestEnvironmentIsAlwaysFull(t *testing.T) {
 	}
 	if mode != "full" || since != "" {
 		t.Fatalf("base attribution environment = (%q, %q), want (full, unset)", mode, since)
+	}
+}
+
+func TestConfiguredTestTimeoutReceiptsDoNotCertifyCommandHistory(t *testing.T) {
+	for _, phase := range []string{"initial evidence", "fix evidence", "fix repair"} {
+		t.Run(phase, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				if phase == "fix evidence" && opts.Purpose == "test-fix" {
+					return &agent.Result{Output: json.RawMessage(`{"summary":"No changes applied"}`)}, nil
+				}
+				return nil, errTestAgentTimeout
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+			sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sctx.StepResultID = sr.ID
+			wantHead := ""
+			wantModes := 0
+			if phase != "initial evidence" {
+				sctx.Fixing = true
+				prior := types.Findings{TestMode: "full", TestedHeadSHA: baseSHA, TestCommandRan: true, TestCommandPassed: true,
+					Items: []types.Finding{{ID: "test-1", Severity: types.FindingSeverityError, Description: "repair behavior", Action: types.ActionAutoFix}}}
+				raw, err := json.Marshal(prior)
+				if err != nil {
+					t.Fatal(err)
+				}
+				sctx.PreviousFindings = string(raw)
+				recordTestModeRound(t, sctx, sr.ID, prior)
+				wantHead = baseSHA
+				wantModes = 1
+			}
+			outcome, err := (&TestStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !outcome.NeedsApproval {
+				t.Fatal("timeout must park Test")
+			}
+			findings, err := types.ParseFindingsJSON(outcome.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if findings.TestedHeadSHA != wantHead {
+				t.Fatalf("timeout changed the live-evidence head: got %q, want %q", findings.TestedHeadSHA, wantHead)
+			}
+			if findings.TestMode != "" || findings.TestSinceSHA != "" || findings.TestCommandRan || findings.TestCommandPassed || findings.BaseTestMode != "" || findings.BaseTestHeadSHA != "" {
+				t.Fatalf("timeout certified a command receipt: %+v", findings)
+			}
+			recordTestModeRound(t, sctx, sr.ID, findings)
+			state, err := configuredTestStateForHead(sctx, headSHA)
+			if err != nil || state.lastTestedHead != wantHead || state.ranOnHead || state.hadDelta {
+				t.Fatalf("timeout changed command history: %+v, %v", state, err)
+			}
+			mode, since, passed := configuredTestRunMode(sctx)
+			if passed || wantHead == "" && (mode != "full" || since != "") || wantHead != "" && (mode != "delta" || since != wantHead) {
+				t.Fatalf("timeout changed retry selection: %q, %q, %t", mode, since, passed)
+			}
+			rounds, err := sctx.DB.GetRoundsByStep(sr.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if modes := collectConfiguredTestModes(sr, rounds); len(modes) != wantModes {
+				t.Fatalf("PR ledger included the timeout receipt: %v", modes)
+			}
+			sctx.Fixing = false
+			sctx.ForceFullTest = true
+			ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+			}
+			outcome, err = (&TestStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings, err = types.ParseFindingsJSON(outcome.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recordTestModeRound(t, sctx, sr.ID, findings)
+			if required, err := finalFullTestRequired(sctx, headSHA); err != nil || required {
+				t.Fatalf("successful retry left Push blocked: required=%t, error=%v", required, err)
+			}
+		})
+	}
+}
+
+func TestPushStepRecordsFormatterHeadBeforeTestRestarts(t *testing.T) {
+	for _, mode := range []string{"full", "delta"} {
+		t.Run(mode, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0", Format: "echo formatted > feature.txt"})
+			sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sctx.StepResultID = sr.ID
+			recordTestModeRound(t, sctx, sr.ID, types.Findings{TestMode: mode, TestedHeadSHA: headSHA, TestCommandRan: true, TestCommandPassed: true})
+			outcome, err := (&PushStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome.RestartFrom != types.StepTest || outcome.RequireFinalFullTest {
+				t.Fatalf("formatter head needs delta validation first: %+v", outcome)
+			}
+			formattedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+			run, err := sctx.DB.GetRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if formattedHead == headSHA || run.HeadSHA != formattedHead || sctx.Run.HeadSHA != formattedHead {
+				t.Fatalf("formatter head not adopted: live=%s recorded=%s memory=%s", formattedHead, run.HeadSHA, sctx.Run.HeadSHA)
+			}
+			outcome, err = (&TestStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings, err := types.ParseFindingsJSON(outcome.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if findings.TestMode != "delta" || findings.TestSinceSHA != headSHA || findings.TestedHeadSHA != formattedHead || !findings.TestCommandRan {
+				t.Fatalf("Test reused the pre-formatter result: %+v", findings)
+			}
+			recordTestModeRound(t, sctx, sr.ID, findings)
+			outcome, err = (&PushStep{}).Execute(sctx)
+			if err != nil || outcome.RestartFrom != types.StepTest || !outcome.RequireFinalFullTest {
+				t.Fatalf("Push did not advance to final full: %+v, %v", outcome, err)
+			}
+		})
+	}
+}
+
+func TestConfiguredTestFinalFullRequestIsConsumedByOneAttempt(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 7"})
+	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = sr.ID
+	recordTestModeRound(t, sctx, sr.ID, types.Findings{TestMode: "delta", TestedHeadSHA: headSHA, TestSinceSHA: baseSHA, TestCommandRan: true, TestCommandPassed: true})
+	sctx.ForceFullTest = true
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findings.TestMode != "full" || findings.TestCommandPassed || !outcome.NeedsApproval || sctx.ForceFullTest {
+		t.Fatalf("failed final full did not consume its request: %+v, force=%t", findings, sctx.ForceFullTest)
+	}
+	recordTestModeRound(t, sctx, sr.ID, findings)
+	sctx.Config.Commands.Test = "exit 0"
+	sctx.Fixing = true
+	sctx.PreviousFindings = outcome.Findings
+	outcome, err = (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, err = types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findings.TestMode != "delta" || findings.TestSinceSHA != headSHA {
+		t.Fatalf("repair inherited the final-full request: %+v", findings)
+	}
+	recordTestModeRound(t, sctx, sr.ID, findings)
+	if required, err := finalFullTestRequired(sctx, headSHA); err != nil || !required {
+		t.Fatalf("delta repair must require a new final full: required=%t error=%v", required, err)
+	}
+}
+
+func TestPushStepRecordsAdvancedHeadBeforeFinalFullRestart(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("formatted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "feature.txt")
+	gitCmd(t, dir, "commit", "-m", "formatter correction")
+	formattedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordTestModeRound(t, sctx, sr.ID, types.Findings{TestMode: "delta", TestedHeadSHA: formattedHead, TestCommandRan: true, TestCommandPassed: true})
+	outcome, err := (&PushStep{}).Execute(sctx)
+	if err != nil || outcome.RestartFrom != types.StepTest || !outcome.RequireFinalFullTest {
+		t.Fatalf("Push outcome = %+v, %v, want final full restart", outcome, err)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.HeadSHA != formattedHead || sctx.Run.HeadSHA != formattedHead {
+		t.Fatalf("final full restart retained stale head: durable=%s memory=%s want=%s", run.HeadSHA, sctx.Run.HeadSHA, formattedHead)
+	}
+}
+
+func TestFinalFullTestGateHonorsApprovedFailureOnlyOnItsHead(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "exit 7"})
+	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = sr.ID
+	recordTestModeRound(t, sctx, sr.ID, types.Findings{TestMode: "delta", TestedHeadSHA: headSHA, TestCommandRan: true, TestCommandPassed: true})
+	failed := types.Findings{TestMode: "full", TestedHeadSHA: headSHA, TestCommandRan: true,
+		Items: []types.Finding{{Severity: types.FindingSeverityError, Category: types.FindingCategoryTestCommand, Description: "configured test command failed with exit code 7"}}}
+	recordTestModeRound(t, sctx, sr.ID, failed)
+	raw, err := json.Marshal(failed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.ParkStepForApproval(sctx.Run.ID, sr.ID, types.StepStatusAwaitingApproval, 7, 1, testStringPtr(string(raw))); err != nil {
+		t.Fatal(err)
+	}
+	if required, err := finalFullTestRequired(sctx, headSHA); err != nil || !required {
+		t.Fatalf("unapproved failure satisfied final full: %t, %v", required, err)
+	}
+	reason, err := (&TestStep{}).VerifyApprovalOverride(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.SetTestApprovalReason(sr.ID, "accept known failure"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.SetStepOverrideReason(sr.ID, reason); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.CompleteStep(sr.ID, 7, 1, "test.log"); err != nil {
+		t.Fatal(err)
+	}
+	if required, err := finalFullTestRequired(sctx, headSHA); err != nil || required {
+		t.Fatalf("approved final full failure restarted Test: %t, %v", required, err)
+	}
+	if required, err := finalFullTestRequired(sctx, "later-head"); err != nil || !required {
+		t.Fatalf("approval satisfied a different head: %t, %v", required, err)
+	}
+	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	md, _ := buildPipelineSummaryFor(steps, nil, headSHA, scm.ProviderUnknown, pipelineAttestationPolicy{AllowTestCommandOverride: "known failure"})
+	attestation := parsePipelineAttestationForTest(t, md)
+	if attestation.AllowTestCommandOverride != "known failure" || len(attestation.Steps) != 1 || attestation.Steps[0].OverrideReason != "configured test command failed with exit code 7" {
+		t.Fatalf("final full approval lost its override attestation: %+v", attestation)
 	}
 }
 

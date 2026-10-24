@@ -169,6 +169,7 @@ Previous test findings to address:
 
 	testCmd := sctx.Config.Commands.Test
 	testMode, testSince, priorFullPassed := configuredTestRunMode(sctx)
+	reuseFullPass := priorFullPassed && !sctx.ForceFullTest
 	testCommandRan := false
 	testCommandPassed := false
 	baseTestMode := ""
@@ -185,7 +186,7 @@ Previous test findings to address:
 		}
 		declareStepCommandOverrides(sctx, "test")
 		if testCmd != "" {
-			if priorFullPassed && !sctx.ForceFullTest {
+			if reuseFullPass {
 				testCommandRan = false
 				testCommandPassed = true
 				sctx.Log(fmt.Sprintf("configured test command already passed on head %s; reusing full result", shortSHA(sctx.Run.HeadSHA)))
@@ -196,8 +197,11 @@ Previous test findings to address:
 			}
 		}
 		commandToRun := testCmd
-		if priorFullPassed && !sctx.ForceFullTest {
+		if reuseFullPass {
 			commandToRun = ""
+		}
+		if commandToRun != "" {
+			sctx.ForceFullTest = false
 		}
 		output, results, err := runConfiguredChecksForTest(sctx, commandToRun, testMode, testSince)
 		if err != nil {
@@ -205,7 +209,7 @@ Previous test findings to address:
 			return nil, fmt.Errorf("run test command: %w", err)
 		}
 		baselineResults = results
-		if priorFullPassed && !sctx.ForceFullTest {
+		if reuseFullPass {
 			testCommandPassed = true
 		} else {
 			testCommandPassed = testCmd == "" || len(results) > 0 && results[0].ExitCode == 0 && !results[0].Local
@@ -240,9 +244,7 @@ Previous test findings to address:
 		}
 	}
 	if repairCut != nil {
-		outcome := testAgentTimeoutOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode)
-		outcome.Findings = withTestCommandMode(outcome.Findings, testMode, testSince, testCommandRan, testCommandPassed, baseTestMode, baseTestSHA)
-		return outcome, nil
+		return testAgentTimeoutOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode), nil
 	}
 
 	evidenceDir := testEvidenceDir(sctx)
@@ -371,7 +373,6 @@ Rules:
 		if errors.Is(err, errTestAgentTimeout) {
 			outcome := testAgentTimeoutOutcome(sctx, err, startHead, baselineFindings, baselineSummary, baselineExitCode)
 			outcome.FixSummary = fixSummary
-			outcome.Findings = withTestCommandMode(outcome.Findings, testMode, testSince, testCommandRan, testCommandPassed, baseTestMode, baseTestSHA)
 			return outcome, nil
 		}
 		return nil, err
@@ -417,24 +418,6 @@ Rules:
 		ExitCode:      baselineExitCode,
 		FixSummary:    fixSummary,
 	}, nil
-}
-
-func withTestCommandMode(raw, mode, since string, ran, passed bool, baseMode, baseSHA string) string {
-	findings, err := types.ParseFindingsJSON(raw)
-	if err != nil {
-		return raw
-	}
-	findings.TestMode = mode
-	findings.TestSinceSHA = since
-	findings.TestCommandRan = ran
-	findings.TestCommandPassed = passed
-	findings.BaseTestMode = baseMode
-	findings.BaseTestHeadSHA = baseSHA
-	encoded, err := json.Marshal(findings)
-	if err != nil {
-		return raw
-	}
-	return string(encoded)
 }
 
 // testAnalyzerMaxAttempts is the number of evidence-analyzer invocations
@@ -707,6 +690,12 @@ var errTestAgentTimeout = errors.New("test agent timeout")
 // fix round keeps the gate it was answering.
 func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead string, baseline []Finding, baselineSummary string, exitCode int) *pipeline.StepOutcome {
 	park := answeredTestGate(sctx)
+	park.TestMode = ""
+	park.TestSinceSHA = ""
+	park.TestCommandRan = false
+	park.TestCommandPassed = false
+	park.BaseTestMode = ""
+	park.BaseTestHeadSHA = ""
 	cause := "This is a budget or provider-slowness cut, not a code failure."
 	if exitCode != 0 || hasBlockingFindings(park.Items) || park.Verdict == types.TestVerdictNoGo || park.Verdict == types.TestVerdictInconclusive {
 		cause = "The cut does not clear the findings reported alongside it."

@@ -1200,7 +1200,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		Shared:            e.shared,
 		EvidenceDir:       e.runEvidenceDir(run.ID),
 		Fixing:            state.fixing,
-		ForceFullTest:     e.forceFullTest,
+		ForceFullTest:     stepName == types.StepTest && e.forceFullTest,
 		SkipFixExecution:  state.skipFixExecution,
 		FinalizingAnswers: state.answering,
 		CarriedFindings:   answerRoundCarriedFindings(state.answering, outstandingFindings),
@@ -1215,6 +1215,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		CIReadinessChanged: ciReadinessChanged,
 		MarkRunning:        markRunning,
 		OnPRMerged:         e.onPRMerged,
+	}
+	if stepName == types.StepTest {
+		e.forceFullTest = false
 	}
 	if stepName == types.StepReview {
 		BindUncertifiedPipelineRange(sctx)
