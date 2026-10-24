@@ -1349,30 +1349,29 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		return nil
 	}
 	sctx := &StepContext{
-		Ctx:                  ctx,
-		Run:                  run,
-		Repo:                 repo,
-		WorkDir:              workDir,
-		GateDir:              e.paths.RepoDir(repo.ID),
-		Agent:                stepAgent,
-		Config:               e.config,
-		ForgeContext:         e.forge,
-		DB:                   e.db,
-		StepResultID:         sr.ID,
-		UserIntent:           userIntent,
-		IntentSource:         userIntentSource,
-		Sessions:             e.sessions,
-		Shared:               e.shared,
-		EvidenceDir:          e.runEvidenceDir(run.ID),
-		Fixing:               state.fixing,
-		SkipFixExecution:     state.skipFixExecution,
-		FinalizingAnswers:    state.answering,
-		CoverageContinuation: state.coverageRound,
-		CarriedFindings:      answerRoundCarriedFindings(state.answering, outstandingFindings),
-		PreviousFindings:     state.previousFindings,
-		DeferredFindings:     state.deferredFindings,
-		Log:                  writeLog,
-		LogChunk:             writeLogChunk,
+		Ctx:               ctx,
+		Run:               run,
+		Repo:              repo,
+		WorkDir:           workDir,
+		GateDir:           e.paths.RepoDir(repo.ID),
+		Agent:             stepAgent,
+		Config:            e.config,
+		ForgeContext:      e.forge,
+		DB:                e.db,
+		StepResultID:      sr.ID,
+		UserIntent:        userIntent,
+		IntentSource:      userIntentSource,
+		Sessions:          e.sessions,
+		Shared:            e.shared,
+		EvidenceDir:       e.runEvidenceDir(run.ID),
+		Fixing:            state.fixing,
+		SkipFixExecution:  state.skipFixExecution,
+		FinalizingAnswers: state.answering,
+		CarriedFindings:   answerRoundCarriedFindings(state.answering, outstandingFindings),
+		PreviousFindings:  state.previousFindings,
+		DeferredFindings:  state.deferredFindings,
+		Log:               writeLog,
+		LogChunk:          writeLogChunk,
 		LogFile: func(text string) {
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)
@@ -1387,6 +1386,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// rounds that channel already carries.
 		BindPreviousRunReviewRounds(sctx)
 	}
+	sctx.CoverageContinuation = state.coverageRound
 	// Every step, not just review: the steps that used to re-apply a declined
 	// change were precisely the ones a decision never reached.
 	BindBranchDecisions(sctx)
