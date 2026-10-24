@@ -315,6 +315,14 @@ type Findings struct {
 	Scenarios         []TestScenario     `json:"scenarios,omitempty"`
 	Verdict           string             `json:"verdict,omitempty"`
 	TestedHeadSHA     string             `json:"tested_head_sha,omitempty"`
+	// TestMode and TestSinceSHA record the configured test command contract for
+	// this Test round. Since is populated only for delta runs.
+	TestMode          string `json:"test_mode,omitempty"`
+	TestSinceSHA      string `json:"test_since_sha,omitempty"`
+	TestCommandPassed bool   `json:"test_command_passed,omitempty"`
+	TestCommandRan    bool   `json:"test_command_ran,omitempty"`
+	BaseTestMode      string `json:"base_test_mode,omitempty"`
+	BaseTestHeadSHA   string `json:"base_test_head_sha,omitempty"`
 	// UnvalidatedSinceSHA is set only on a Test budget-cut park: the head its
 	// unvalidated-work check measured from, carried so a repeated cut before any
 	// evidence turn completes re-measures from that same head.
@@ -336,6 +344,12 @@ type findingsWire struct {
 	Scenarios           []TestScenario     `json:"scenarios"`
 	Verdict             string             `json:"verdict"`
 	TestedHeadSHA       string             `json:"tested_head_sha"`
+	TestMode            string             `json:"test_mode"`
+	TestSinceSHA        string             `json:"test_since_sha"`
+	TestCommandPassed   bool               `json:"test_command_passed"`
+	TestCommandRan      bool               `json:"test_command_ran"`
+	BaseTestMode        string             `json:"base_test_mode"`
+	BaseTestHeadSHA     string             `json:"base_test_head_sha"`
 	UnvalidatedSinceSHA string             `json:"unvalidated_since_sha"`
 	RiskLevel           string             `json:"risk_level"`
 	RiskRationale       string             `json:"risk_rationale"`
@@ -364,6 +378,12 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		Scenarios:           wire.Scenarios,
 		Verdict:             wire.Verdict,
 		TestedHeadSHA:       wire.TestedHeadSHA,
+		TestMode:            wire.TestMode,
+		TestSinceSHA:        wire.TestSinceSHA,
+		TestCommandPassed:   wire.TestCommandPassed,
+		TestCommandRan:      wire.TestCommandRan,
+		BaseTestMode:        wire.BaseTestMode,
+		BaseTestHeadSHA:     wire.BaseTestHeadSHA,
 		UnvalidatedSinceSHA: wire.UnvalidatedSinceSHA,
 		RiskLevel:           wire.RiskLevel,
 		RiskRationale:       wire.RiskRationale,

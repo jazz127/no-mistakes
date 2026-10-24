@@ -380,7 +380,8 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 		artifacts := collectTestingArtifacts(sr, stepRounds, opts)
 		scenarios := collectTestingScenarios(sr, stepRounds)
 		liveValidation := renderLiveValidationLine(scenarios, collectTestingVerdict(sr, stepRounds))
-		if testingSummary == "" && len(tested) == 0 && len(artifacts) == 0 && liveValidation == "" {
+		testModes := collectConfiguredTestModes(sr, stepRounds)
+		if testingSummary == "" && len(tested) == 0 && len(artifacts) == 0 && liveValidation == "" && len(testModes) == 0 {
 			return "## Testing\n\n- " + line
 		}
 
@@ -403,6 +404,11 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 		if liveValidation != "" {
 			b.WriteString("- ")
 			b.WriteString(liveValidation)
+			b.WriteString("\n")
+		}
+		for _, mode := range testModes {
+			b.WriteString("- Configured test command: ")
+			b.WriteString(mode)
 			b.WriteString("\n")
 		}
 		if table := renderScenarioTable(scenarios, opts.flavor); table != "" {
@@ -447,6 +453,36 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 	}
 
 	return ""
+}
+
+func collectConfiguredTestModes(sr *db.StepResult, rounds []*db.StepRound) []string {
+	var modes []string
+	for _, round := range rounds {
+		if round.FindingsJSON == nil {
+			continue
+		}
+		findings, err := types.ParseFindingsJSON(*round.FindingsJSON)
+		if err != nil {
+			continue
+		}
+		if findings.TestMode != "" && findings.TestCommandRan {
+			mode := findings.TestMode + " on " + shortSHA(findings.TestedHeadSHA)
+			if findings.TestMode == "delta" && findings.TestSinceSHA != "" {
+				mode = "delta since " + shortSHA(findings.TestSinceSHA) + " on " + shortSHA(findings.TestedHeadSHA)
+			}
+			modes = append(modes, mode)
+		}
+		if findings.BaseTestMode != "" && findings.BaseTestHeadSHA != "" {
+			modes = append(modes, findings.BaseTestMode+" for base attribution on "+shortSHA(findings.BaseTestHeadSHA))
+		}
+	}
+	if len(modes) == 0 && sr != nil && sr.FindingsJSON != nil {
+		findings, err := types.ParseFindingsJSON(*sr.FindingsJSON)
+		if err == nil && findings.TestMode != "" && findings.TestCommandRan {
+			modes = append(modes, findings.TestMode+" on "+shortSHA(findings.TestedHeadSHA))
+		}
+	}
+	return modes
 }
 
 func needsArtifactBlockSeparator(previous, current string) bool {

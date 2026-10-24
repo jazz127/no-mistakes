@@ -428,6 +428,25 @@ func TestBuildTestingSummaryForPR_OmitsRecordedTestDetails(t *testing.T) {
 	}
 }
 
+func TestBuildTestingSummaryForPR_RecordsConfiguredTestModes(t *testing.T) {
+	t.Parallel()
+	full, _ := json.Marshal(types.Findings{TestMode: "full", TestedHeadSHA: testPipelineHeadSHA, TestCommandRan: true, TestCommandPassed: true})
+	delta, _ := json.Marshal(types.Findings{TestMode: "delta", TestSinceSHA: "abcdef0123456789", TestedHeadSHA: "fedcba9876543210", TestCommandRan: true, TestCommandPassed: true})
+	steps := []*db.StepResult{{ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted}}
+	rounds := map[string][]*db.StepRound{"test": {
+		{Round: 1, Trigger: "initial", FindingsJSON: testStringPtr(string(full)), DurationMS: 10},
+		{Round: 2, Trigger: "auto_fix", FindingsJSON: testStringPtr(string(delta)), DurationMS: 10},
+	}}
+
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), "", nil)
+	if !strings.Contains(md, "Configured test command: full on "+shortSHA(testPipelineHeadSHA)) {
+		t.Fatalf("PR testing section omitted the full run mode:\n%s", md)
+	}
+	if !strings.Contains(md, "Configured test command: delta since "+shortSHA("abcdef0123456789")+" on "+shortSHA("fedcba9876543210")) {
+		t.Fatalf("PR testing section omitted the delta run mode and since head:\n%s", md)
+	}
+}
+
 func TestBuildTestingSummaryForPR_SummarizesBaselineOnlyTests(t *testing.T) {
 	t.Parallel()
 	findings := "{\"findings\":[],\"summary\":\"\",\"tested\":[\"`go test ./...`\"]}"

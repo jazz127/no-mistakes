@@ -160,6 +160,23 @@ Fallback GitHub token used by `no-mistakes update` when `GITHUB_TOKEN` is unset 
 
 See [`GITHUB_TOKEN`](#github_token) for the updater's authentication behavior and precedence.
 
+## `NO_MISTAKES_TEST_MODE`
+
+Exported by the pipeline to the configured [`commands.test`](/no-mistakes/reference/repo-config/#commandstest) command.
+
+| Value | Selector behavior |
+| ----- | ----------------- |
+| `full` | Run the change's full selected suite. |
+| `delta` | Run the tests covering changes since `NO_MISTAKES_TEST_SINCE`. |
+
+The repository owns the selector and its mapping from changed files to tests. It must fall back to the full selected suite whenever that mapping is uncertain, including changes to shared build inputs or pipeline/configuration files. “Full” refers to the change's selected suite; broad repository regression remains in forge CI. Commands that ignore these variables retain their selection behavior; the [Test step](/no-mistakes/reference/pipeline-steps/#test) owns when commands run, reuse, and final validation.
+
+## `NO_MISTAKES_TEST_SINCE`
+
+The last tested commit recorded by a usable Test round, exported to `commands.test` only in delta mode. It is unset in full mode. The pipeline replaces inherited values of both test variables for this command; these exports do not apply to `commands.prepare`, machine-local additional checks, or evidence-agent invocations.
+
+The selector must fall back to the full selected suite when this commit is missing, unknown, or unreachable. The pipeline supplies the commit, while the repository determines which tests cover the changes since it.
+
 ## `NO_MISTAKES_NO_UPDATE_CHECK`
 
 Disable background update checks.

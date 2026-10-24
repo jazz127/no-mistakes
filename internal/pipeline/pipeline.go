@@ -28,6 +28,7 @@ type StepContext struct {
 	LogChunk         func(string) // raw streaming chunk (user-visible + file)
 	LogFile          func(string) // file-only log callback (not shown to user)
 	Fixing           bool         // true when re-executing after a "fix" action
+	ForceFullTest    bool         // the Push step requested the mandatory final full configured test run
 	SkipFixExecution bool         // replay an already-completed fix round's review turn only
 	// EvalReplay marks a review driven directly by `eval replay` rather than by
 	// the executor. Replay scores the review's findings against captured gold
@@ -169,6 +170,9 @@ type StepOutcome struct {
 	// CI repairs use it when policy requires revalidation or continuity cannot be
 	// proven, sending the new local head back through review before push.
 	RestartFrom types.StepName
+	// RequireFinalFullTest asks the executor to restart at Test before Push
+	// proceeds. The request is recomputed after recovery from recorded Test rounds.
+	RequireFinalFullTest bool
 	// FixSummary, when non-empty, records the result of a fix attempt.
 	FixSummary      string
 	RepairPublished bool

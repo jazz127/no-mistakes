@@ -378,6 +378,8 @@ Machine-local [`repository_overrides.commands`](/no-mistakes/reference/global-co
 Whether the baseline passes, fails, or is absent, the agent then derives targeted end-user scenarios and drives the product itself under the same targeted-validation contract.
 A non-zero exit parks the Test step. Approving that gate records an explicit override on the step and on the PR attestation; the [`require-no-mistakes`](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) check treats that as non-compliant unless [`test.allow_approve_over_failure`](#testallow_approve_over_failure) is set.
 
+This command can implement the [full/delta test-selector environment contract](/no-mistakes/reference/environment/#no_mistakes_test_mode). See the [Test step](/no-mistakes/reference/pipeline-steps/#test) for command scheduling, result reuse, final validation, and PR evidence.
+
 ### commands.lint
 
 Explicit lint command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
