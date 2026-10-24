@@ -92,7 +92,10 @@ func TestAxiTestApprovalExceptionJourney(t *testing.T) {
 			}
 			h.CommitChange(tc.name, ".no-mistakes.yaml", fmt.Sprintf("commands:\n  test: 'exit %d'\n  lint: 'exit 0'\n", tc.exit), "configure synthetic test")
 			head := h.CommitChange(tc.name, "feature.txt", "synthetic feature\n", "add feature")
-			out, err := h.Run("axi", "run", "--intent", "Validate the synthetic feature", "--skip", "pr,ci")
+			// This table owns approval reporting and persistence. Publication
+			// separately requires a successful final full command, so an approved
+			// command failure or skip cannot serve as its prerequisite.
+			out, err := h.Run("axi", "run", "--intent", "Validate the synthetic feature", "--skip", "push,pr,ci")
 			if err != nil {
 				t.Fatalf("run: %v\n%s", err, out)
 			}

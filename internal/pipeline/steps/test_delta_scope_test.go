@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -44,12 +45,12 @@ func TestConfiguredTestCommandReceivesModeAndSince(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
 	modePath := filepath.Join(t.TempDir(), "mode.txt")
-	command := "printf '%s|%s' \"$NO_MISTAKES_TEST_MODE\" \"${NO_MISTAKES_TEST_SINCE-unset}\" > " + modePath
+	command := testModeReceiptCommand(false) + ` > "` + modePath + `"`
 	for _, tc := range []struct {
 		mode, since, want string
-	}{{"full", "", "full|unset"}, {"delta", "abc123", "delta|abc123"}} {
-		if _, _, err := runConfiguredChecksForTest(sctx, command, tc.mode, tc.since); err != nil {
-			t.Fatalf("run %s command: %v", tc.mode, err)
+	}{{"full", "", "full,unset"}, {"delta", "abc123", "delta,abc123"}} {
+		if out, checks, err := runConfiguredChecksForTest(sctx, command, tc.mode, tc.since); err != nil || len(checks) != 1 || checks[0].ExitCode != 0 {
+			t.Fatalf("run %s command: %v, checks=%+v output=%q", tc.mode, err, checks, out)
 		}
 		got, err := os.ReadFile(modePath)
 		if err != nil {
@@ -75,7 +76,7 @@ func TestConfiguredTestCommandLifecycle(t *testing.T) {
 		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"Command environment integration test","tested":["configured shell command"],"testing_summary":"Mode contract exercised with a simulated evidence agent","artifacts":[],"scenarios":[{"name":"evidence agent boundary","result":"untested","live":false,"surface":"simulated","evidence":"mockAgent","reason":"This integration test substitutes only the evidence agent"}],"verdict":"inconclusive"}`)}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, firstHead, config.Commands{
-		Test: `printf '%s|%s|%s\n' "$NO_MISTAKES_TEST_MODE" "${NO_MISTAKES_TEST_SINCE-unset}" "$(git rev-parse HEAD)" >> "$MODE_RECEIPT"`,
+		Test: testModeReceiptCommand(true) + testModeReceiptRedirect("MODE_RECEIPT"),
 	})
 	sctx.Env = []string{"MODE_RECEIPT=" + receipt, "NO_MISTAKES_TEST_MODE=inherited", "NO_MISTAKES_TEST_SINCE=stale-inherited-head"}
 	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
@@ -127,14 +128,14 @@ func TestConfiguredTestCommandLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "full|unset|" + firstHead + "\n" +
-		"delta|" + firstHead + "|" + secondHead + "\n" +
-		"delta|" + secondHead + "|" + finalHead + "\n" +
-		"full|unset|" + finalHead + "\n"
-	if string(got) != want {
+	want := "full,unset," + firstHead + "\n" +
+		"delta," + firstHead + "," + secondHead + "\n" +
+		"delta," + secondHead + "," + finalHead + "\n" +
+		"full,unset," + finalHead + "\n"
+	if strings.ReplaceAll(string(got), "\r\n", "\n") != want {
 		t.Fatalf("actual shell command invocations:\n%s\nwant:\n%s", got, want)
 	}
-	t.Logf("Actual configured-command receipts (mode|since|HEAD):\n%s", got)
+	t.Logf("Actual configured-command receipts (mode,since,HEAD):\n%s", got)
 	rounds, err := sctx.DB.GetRoundsByStep(sr.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -177,7 +178,7 @@ func TestConfiguredTestCommandChangeInvalidatesReceipts(t *testing.T) {
 					return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
 				}}
 				sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{
-					Test: `printf '%s|%s\n' "$NO_MISTAKES_TEST_MODE" "${NO_MISTAKES_TEST_SINCE-unset}" >> "$TEST_RECEIPT"`,
+					Test: testModeReceiptCommand(false) + testModeReceiptRedirect("TEST_RECEIPT"),
 				})
 				receipt := filepath.Join(t.TempDir(), "commands.txt")
 				sctx.Env = []string{"TEST_RECEIPT=" + receipt}
@@ -203,7 +204,7 @@ func TestConfiguredTestCommandChangeInvalidatesReceipts(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if string(got) != "full|unset\n" {
+				if strings.ReplaceAll(string(got), "\r\n", "\n") != "full,unset\n" {
 					t.Fatalf("new command must run in full without the old delta anchor: %q", got)
 				}
 				findings, err := types.ParseFindingsJSON(outcome.Findings)
@@ -223,7 +224,7 @@ func TestConfiguredTestCommandChangeInvalidatesReceipts(t *testing.T) {
 					t.Fatal(err)
 				}
 				got, err = os.ReadFile(receipt)
-				if err != nil || string(got) != "full|unset\n" {
+				if err != nil || strings.ReplaceAll(string(got), "\r\n", "\n") != "full,unset\n" {
 					t.Fatalf("same command's successful full run was repeated on the same head: %q, %v", got, err)
 				}
 			})
@@ -302,19 +303,19 @@ func TestBaseAttributionCommandReceivesFullMode(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = []string{"NO_MISTAKES_TEST_MODE=delta", "NO_MISTAKES_TEST_SINCE=stale-head"}
-	output, code, err := runTestCommandOnBase(sctx, `printf '%s|%s|%s\n' "$NO_MISTAKES_TEST_MODE" "${NO_MISTAKES_TEST_SINCE-unset}" "$(git rev-parse HEAD)"`, baseSHA)
+	output, code, err := runTestCommandOnBase(sctx, testModeReceiptCommand(true), baseSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Base attribution must execute the full command at the actual base,
 	// independently of the environment inherited from a delta head run.
-	if code != 0 || strings.TrimSpace(output) != "full|unset|"+baseSHA {
-		t.Fatalf("base command: code=%d output=%q; want full|unset|%s", code, output, baseSHA)
+	if code != 0 || strings.TrimSpace(output) != "full,unset,"+baseSHA {
+		t.Fatalf("base command: code=%d output=%q; want full,unset,%s", code, output, baseSHA)
 	}
 	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
 		t.Fatalf("base attribution moved the run head: got %s, want %s", got, headSHA)
 	}
-	t.Logf("Actual base command receipt (mode|since|HEAD): %s", strings.TrimSpace(output))
+	t.Logf("Actual base command receipt (mode,since,HEAD): %s", strings.TrimSpace(output))
 }
 
 func TestConfiguredTestTimeoutReceiptsDoNotCertifyCommandHistory(t *testing.T) {
@@ -401,7 +402,7 @@ func TestPushStepRecordsFormatterHeadBeforeTestRestarts(t *testing.T) {
 				return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
 			}}
 			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{
-				Test:   `printf '%s|%s\n' "$NO_MISTAKES_TEST_MODE" "${NO_MISTAKES_TEST_SINCE-unset}" >> "$TEST_RECEIPT"`,
+				Test:   testModeReceiptCommand(false) + testModeReceiptRedirect("TEST_RECEIPT"),
 				Format: "echo formatted > feature.txt",
 			})
 			receipt := filepath.Join(t.TempDir(), "commands.txt")
@@ -486,11 +487,11 @@ func TestPushStepRecordsFormatterHeadBeforeTestRestarts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := "full|unset\n"
+			want := "full,unset\n"
 			if mode == "timeout" {
-				want += "full|unset\n"
+				want += "full,unset\n"
 			}
-			if string(got) != want {
+			if strings.ReplaceAll(string(got), "\r\n", "\n") != want {
 				t.Fatalf("expected one full invocation on the formatter head: got %q, want %q", got, want)
 			}
 		})
@@ -502,7 +503,11 @@ func TestConfiguredTestFinalFullRequestIsConsumedByOneAttempt(t *testing.T) {
 	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 		return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
 	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: `test -f "$TEST_SUCCESS_FILE"`})
+	command := `test -f "$TEST_SUCCESS_FILE"`
+	if runtime.GOOS == "windows" {
+		command = `if exist "%TEST_SUCCESS_FILE%" (exit /b 0) else (exit /b 1)`
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: command})
 	successFile := filepath.Join(t.TempDir(), "passed")
 	sctx.Env = []string{"TEST_SUCCESS_FILE=" + successFile}
 	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
@@ -537,7 +542,7 @@ func TestConfiguredTestFinalFullRequestIsConsumedByOneAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if findings.TestMode != "delta" || findings.TestSinceSHA != headSHA {
+	if findings.TestMode != "delta" || findings.TestSinceSHA != headSHA || !findings.TestCommandPassed {
 		t.Fatalf("repair inherited the final-full request: %+v", findings)
 	}
 	recordTestModeRound(t, sctx, sr.ID, findings)
@@ -709,3 +714,27 @@ func recordTestModeRound(t *testing.T, sctx *pipeline.StepContext, stepID string
 var _ agent.Agent = (*mockAgent)(nil)
 
 func testStringPtr(value string) *string { return &value }
+
+// These fixtures execute the mode/since contract through the platform's actual
+// shell, including an unset SINCE and (where requested) the checkout's real HEAD.
+func testModeReceiptCommand(includeHead bool) string {
+	if runtime.GOOS == "windows" {
+		head, prefix := "", ""
+		if includeHead {
+			prefix = `for /f %h in ('git rev-parse HEAD') do @`
+			head = ",%h"
+		}
+		return "(" + prefix + `if defined NO_MISTAKES_TEST_SINCE (echo %NO_MISTAKES_TEST_MODE%,%NO_MISTAKES_TEST_SINCE%` + head + `) else (echo %NO_MISTAKES_TEST_MODE%,unset` + head + "))"
+	}
+	if includeHead {
+		return `printf '%s,%s,%s\n' "$NO_MISTAKES_TEST_MODE" "${NO_MISTAKES_TEST_SINCE-unset}" "$(git rev-parse HEAD)"`
+	}
+	return `printf '%s,%s\n' "$NO_MISTAKES_TEST_MODE" "${NO_MISTAKES_TEST_SINCE-unset}"`
+}
+
+func testModeReceiptRedirect(variable string) string {
+	if runtime.GOOS == "windows" {
+		return ` >> "%` + variable + `%"`
+	}
+	return ` >> "$` + variable + `"`
+}
