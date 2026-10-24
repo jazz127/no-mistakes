@@ -84,6 +84,19 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err != nil {
 		return nil, fmt.Errorf("resolve head before push: %w", err)
 	}
+	if sctx.Config.Commands.Test != "" {
+		required, err := finalFullTestRequired(sctx, headBeingPushed)
+		if err != nil {
+			return nil, err
+		}
+		if required {
+			if err := recordAgentFixHead(sctx, s.Name(), headBeingPushed); err != nil {
+				return nil, err
+			}
+			sctx.Log(fmt.Sprintf("requiring a successful full configured test run on final head %s before push", headBeingPushed))
+			return &pipeline.StepOutcome{RestartFrom: types.StepTest, RequireFinalFullTest: true}, nil
+		}
+	}
 	// This run's own review/test/document have already completed by now (see
 	// AllSteps' fixed order), so these are honest statuses to attest for the
 	// head about to be pushed - see attestHeadBeforePush.
@@ -97,6 +110,42 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 
 	sctx.Log("pushed successfully")
 	return &pipeline.StepOutcome{}, nil
+}
+
+func finalFullTestRequired(sctx *pipeline.StepContext, headSHA string) (bool, error) {
+	if sctx.Config.Commands.Test == "" {
+		return false, nil
+	}
+	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil {
+		return false, fmt.Errorf("load Test rounds before push: %w", err)
+	}
+	for _, step := range steps {
+		if step.StepName != types.StepTest {
+			continue
+		}
+		rounds, err := sctx.DB.GetRoundsByStep(step.ID)
+		if err != nil {
+			return false, fmt.Errorf("load Test round evidence before push: %w", err)
+		}
+		for _, round := range rounds {
+			if round.FindingsJSON == nil {
+				continue
+			}
+			findings, err := types.ParseFindingsJSON(*round.FindingsJSON)
+			if err != nil {
+				return false, fmt.Errorf("parse configured Test evidence for push: %w", err)
+			}
+			if configuredTestReceiptMatches(sctx, findings) && findings.TestMode == "full" &&
+				findings.TestCommandPassed && findings.TestedHeadSHA == headSHA {
+				return false, nil
+			}
+		}
+		if step.Status == types.StepStatusSkipped {
+			return false, fmt.Errorf("cannot validate final head %s: configured Test step is skipped; required validation cannot be restarted", headSHA)
+		}
+	}
+	return true, nil
 }
 
 // publishRunHead is the single guarded publication path for a run's head. Both

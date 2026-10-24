@@ -2204,35 +2204,57 @@ func assertFailingTestCommandRun(t *testing.T, h *Harness) {
 	}
 	awaitingDurationMS := *testStep.DurationMS
 	time.Sleep(300 * time.Millisecond)
+	// Approval preserves the exception, but cannot substitute for the final
+	// successful full command required before publication. The CLI follows the
+	// restart to its next gate, so this cannot observe the original park again.
+	out, err := h.Run("axi", "respond", "--step", "test", "--action", "approve")
+	if err != nil {
+		t.Fatalf("approve failing Test: %v\n%s", err, out)
+	}
+	restarted := waitForStepStatus(t, h, "failing-test-command", types.StepTest, types.StepStatusAwaitingApproval, 30*time.Second)
+	restartedTest, ok := findStep(restarted.Steps, types.StepTest)
+	if !ok || restartedTest.ExitCode == nil || *restartedTest.ExitCode != 1 {
+		t.Fatalf("final full must park on the still-failing command: %+v", restartedTest)
+	}
+	database, err := db.OpenReadOnly(filepath.Join(h.NMHome, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	rounds, err := database.GetRoundsByStep(testStep.ID)
+	if err != nil || len(rounds) != 2 {
+		t.Fatalf("expected initial and final-full Test rounds: %+v, %v", rounds, err)
+	}
+	for _, round := range rounds {
+		if round.FindingsJSON == nil {
+			t.Fatal("missing configured-command receipt")
+		}
+		f, err := types.ParseFindingsJSON(*round.FindingsJSON)
+		if err != nil || f.TestMode != "full" || !f.TestCommandRan || f.TestCommandPassed || f.TestedHeadSHA != run.HeadSHA {
+			t.Fatalf("full command failure receipt lost: %+v, %v", f, err)
+		}
+	}
+	if rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != db.RoundSelectionSourceUserDeclined {
+		t.Fatalf("original approval decision lost: %+v", rounds[0])
+	}
+	if rounds[0].DurationMS > awaitingDurationMS+200 {
+		t.Fatalf("Test duration included approval wait: awaiting=%dms round=%dms", awaitingDurationMS, rounds[0].DurationMS)
+	}
+	published, err := h.runGit(context.Background(), h.WorkDir, "ls-remote", "origin", "refs/heads/failing-test-command")
+	if err != nil || len(bytes.TrimSpace(published)) != 0 {
+		t.Fatalf("approved failure must remain unpublished: %q, %v", published, err)
+	}
+	// A later successful final full run permits ordinary publication.
+	if err := os.WriteFile(failingCommand, []byte("#!/bin/sh\necho configured test passed\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	h.Respond(run.ID, types.StepTest, types.ActionApprove)
 	completed := h.WaitForRun("failing-test-command", 60*time.Second)
 	if completed.Status != types.RunCompleted {
-		t.Fatalf("failing test command run did not complete after approve: status=%s error=%v", completed.Status, deref(completed.Error))
+		t.Fatalf("successful final full did not permit publication: status=%s error=%v", completed.Status, deref(completed.Error))
 	}
-	completedTestStep, ok := findStep(completed.Steps, types.StepTest)
-	if !ok {
-		t.Fatal("expected completed test step in failing test command run")
-	}
-	if completedTestStep.Status != types.StepStatusCompleted {
-		t.Fatalf("expected completed test step after approve, got %s", completedTestStep.Status)
-	}
-	if completedTestStep.ExitCode == nil || *completedTestStep.ExitCode != 1 {
-		t.Fatalf("failing test command exit code = %v, want 1", completedTestStep.ExitCode)
-	}
-	if completedTestStep.DurationMS == nil {
-		t.Fatal("expected completed failing test step to expose execution duration")
-	}
-	if *completedTestStep.DurationMS > awaitingDurationMS+200 {
-		t.Fatalf("test step duration should exclude approval wait: awaiting=%dms completed=%dms", awaitingDurationMS, *completedTestStep.DurationMS)
-	}
-	for _, stepName := range []types.StepName{types.StepDocument, types.StepLint, types.StepPush} {
-		step, ok := findStep(completed.Steps, stepName)
-		if !ok {
-			t.Fatalf("expected %s step after approving failing test command", stepName)
-		}
-		if step.Status != types.StepStatusCompleted {
-			t.Fatalf("expected %s to continue after approved test step, got %s", stepName, step.Status)
-		}
+	if h.UpstreamBranchSHA("failing-test-command") != completed.HeadSHA {
+		t.Fatal("validated final head was not published")
 	}
 }
 

@@ -2,6 +2,7 @@ package steps
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -29,6 +30,11 @@ func declareStepCommandOverrides(sctx *pipeline.StepContext, name string) {
 
 func executeRepositoryCommand(sctx *pipeline.StepContext, name, command string) (string, int, error) {
 	return runShellCommandWithPriority(sctx.Ctx, sctx.WorkDir, stepEnvironment(sctx), command, sctx.Config.CommandOverrides[name].Nice)
+}
+
+func executeRepositoryTestCommand(sctx *pipeline.StepContext, command, mode, since string) (string, int, error) {
+	env := testCommandEnvironment(sctx, mode, since)
+	return runShellCommandWithPriority(sctx.Ctx, sctx.WorkDir, env, command, sctx.Config.CommandOverrides["test"].Nice)
 }
 
 // commandOverrideDeclaration states every machine-local override applied to a
@@ -80,6 +86,34 @@ func failedChecks(results []checkResult) []checkResult {
 // runConfiguredChecks runs the repository command (when nonempty) followed by
 // the operator's machine-local additional checks for name.
 func runConfiguredChecks(sctx *pipeline.StepContext, name, command string) (string, []checkResult, error) {
+	return runConfiguredChecksWithTestMode(sctx, name, command, "", "")
+}
+
+func runConfiguredChecksForTest(sctx *pipeline.StepContext, command, mode, since string) (string, []checkResult, error) {
+	return runConfiguredChecksWithTestMode(sctx, "test", command, mode, since)
+}
+
+func testCommandEnvironment(sctx *pipeline.StepContext, mode, since string) []string {
+	env := stepEnvironment(sctx)
+	if env == nil {
+		env = os.Environ()
+	}
+	filtered := make([]string, 0, len(env)+2)
+	for _, entry := range env {
+		key := envKey(entry)
+		if key == "NO_MISTAKES_TEST_MODE" || key == "NO_MISTAKES_TEST_SINCE" {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	filtered = append(filtered, "NO_MISTAKES_TEST_MODE="+mode)
+	if mode == "delta" && since != "" {
+		filtered = append(filtered, "NO_MISTAKES_TEST_SINCE="+since)
+	}
+	return filtered
+}
+
+func runConfiguredChecksWithTestMode(sctx *pipeline.StepContext, name, command, mode, since string) (string, []checkResult, error) {
 	override := sctx.Config.CommandOverrides[name]
 	checks := []checkResult{}
 	if command != "" {
@@ -99,7 +133,14 @@ func runConfiguredChecks(sctx *pipeline.StepContext, name, command string) (stri
 		} else if len(override.Additional) > 0 {
 			fmt.Fprintf(&output, "\nconfigured %s command: %s\n", name, checks[i].Command)
 		}
-		out, code, err := executeRepositoryCommand(sctx, name, checks[i].Command)
+		var out string
+		var code int
+		var err error
+		if name == "test" && !checks[i].Local && mode != "" {
+			out, code, err = executeRepositoryTestCommand(sctx, checks[i].Command, mode, since)
+		} else {
+			out, code, err = executeRepositoryCommand(sctx, name, checks[i].Command)
+		}
 		output.WriteString(out)
 		if err != nil {
 			return output.String(), checks[:i], err
