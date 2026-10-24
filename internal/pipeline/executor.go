@@ -64,9 +64,10 @@ type Executor struct {
 
 	// sessions manages this run's durable review-loop agent sessions; shared
 	// carries run-scoped step-to-step results. Both are created per Execute.
-	sessions *RunSessions
-	shared   *RunShared
-	workDir  string
+	sessions      *RunSessions
+	shared        *RunShared
+	workDir       string
+	forceFullTest bool
 
 	mu                     sync.Mutex
 	approvalCh             chan approvalResponse // buffered channel for approval responses
@@ -352,6 +353,7 @@ func (e *Executor) roundsForFixValidation() ([]*db.StepRound, *RespondRefusal) {
 // the cause message is preserved as the run's error in the DB.
 func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
 	e.workDir = workDir
+	e.forceFullTest = false
 	ctx = e.runContext(ctx)
 	// Mark run as running. Route write failures through failRun so the
 	// in-memory lifecycle and subscriber stream still become terminal instead
@@ -1198,6 +1200,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		Shared:            e.shared,
 		EvidenceDir:       e.runEvidenceDir(run.ID),
 		Fixing:            state.fixing,
+		ForceFullTest:     e.forceFullTest,
 		SkipFixExecution:  state.skipFixExecution,
 		FinalizingAnswers: state.answering,
 		CarriedFindings:   answerRoundCarriedFindings(state.answering, outstandingFindings),
@@ -1279,6 +1282,9 @@ rounds:
 			return false, "", fmt.Errorf("step %s failed: %s", stepName, redactedErr)
 		}
 		restartFrom = outcome.RestartFrom
+		if outcome.RequireFinalFullTest {
+			e.forceFullTest = true
+		}
 
 		if stepName == types.StepReview {
 			reviewApprovedHeadSHA = outcome.ReviewApprovedHeadSHA

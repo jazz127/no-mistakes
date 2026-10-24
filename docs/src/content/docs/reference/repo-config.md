@@ -378,6 +378,10 @@ Machine-local [`repository_overrides.commands`](/no-mistakes/reference/global-co
 Whether the baseline passes, fails, or is absent, the agent then derives targeted end-user scenarios and drives the product itself under the same targeted-validation contract.
 A non-zero exit parks the Test step. Approving that gate records an explicit override on the step and on the PR attestation; the [`require-no-mistakes`](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) check treats that as non-compliant unless [`test.allow_approve_over_failure`](#testallow_approve_over_failure) is set.
 
+The pipeline exports `NO_MISTAKES_TEST_MODE=full` for the first run and any required final run before push. After a review, test, document, lint, or CI fix changes the head, it exports `NO_MISTAKES_TEST_MODE=delta` and `NO_MISTAKES_TEST_SINCE=<last tested commit>` for the rerun. `NO_MISTAKES_TEST_SINCE` is unset in full mode. If any delta run occurred, push waits for a full run to pass on the exact head being pushed; a full run already passed on that head is reused. A failing `test.base_attribution` rerun on the base always receives full mode. The Test log and PR Testing section record each configured-command mode and tested head.
+
+Repositories may use these variables in their test selector. The selector owns the mapping from changed files to tests and must run the full selected suite whenever it cannot safely identify affected tests, including when `NO_MISTAKES_TEST_SINCE` is missing, unknown, or unreachable, or shared build inputs changed. Commands that ignore the variables keep their existing behavior, with the additional final full run required only after a delta run.
+
 ### commands.lint
 
 Explicit lint command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.

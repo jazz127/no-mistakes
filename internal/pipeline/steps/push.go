@@ -74,6 +74,20 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err != nil {
 		return nil, fmt.Errorf("resolve head before push: %w", err)
 	}
+	if sctx.Config.Commands.Test != "" {
+		testState, err := configuredTestStateForHead(sctx, headBeingPushed)
+		if err != nil {
+			return nil, err
+		}
+		if !testState.ranOnHead && testState.lastTestedHead != "" {
+			sctx.Log(fmt.Sprintf("configured tests have not run on final head %s; running delta validation before push", headBeingPushed))
+			return &pipeline.StepOutcome{RestartFrom: types.StepTest}, nil
+		}
+		if testState.hadDelta && !testState.fullPassedOnHead {
+			sctx.Log(fmt.Sprintf("delta test runs were recorded; requiring a full configured test run on final head %s before push", headBeingPushed))
+			return &pipeline.StepOutcome{RestartFrom: types.StepTest, RequireFinalFullTest: true}, nil
+		}
+	}
 	// This run's own review/test/document have already completed by now (see
 	// AllSteps' fixed order), so these are honest statuses to attest for the
 	// head about to be pushed - see attestHeadBeforePush.
@@ -87,6 +101,65 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 
 	sctx.Log("pushed successfully")
 	return &pipeline.StepOutcome{}, nil
+}
+
+type configuredTestState struct {
+	lastTestedHead   string
+	ranOnHead        bool
+	hadDelta         bool
+	fullPassedOnHead bool
+}
+
+func configuredTestStateForHead(sctx *pipeline.StepContext, headSHA string) (configuredTestState, error) {
+	state := configuredTestState{}
+	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil {
+		return state, fmt.Errorf("load Test rounds before push: %w", err)
+	}
+	for _, step := range steps {
+		if step.StepName != types.StepTest {
+			continue
+		}
+		rounds, err := sctx.DB.GetRoundsByStep(step.ID)
+		if err != nil {
+			return state, fmt.Errorf("load Test round evidence before push: %w", err)
+		}
+		for _, round := range rounds {
+			if round.FindingsJSON == nil {
+				continue
+			}
+			findings, err := types.ParseFindingsJSON(*round.FindingsJSON)
+			if err != nil {
+				if strings.Contains(*round.FindingsJSON, `"test_mode"`) {
+					return state, fmt.Errorf("parse configured Test mode evidence for push: %w", err)
+				}
+				continue
+			}
+			if findings.TestMode == "" {
+				continue
+			}
+			if findings.TestedHeadSHA == "" {
+				return state, fmt.Errorf("configured Test mode evidence in round %d has no tested head", round.Round)
+			}
+			if findings.TestMode != "full" && findings.TestMode != "delta" {
+				return state, fmt.Errorf("unknown configured Test mode %q in round %d", findings.TestMode, round.Round)
+			}
+			state.lastTestedHead = findings.TestedHeadSHA
+			state.ranOnHead = state.ranOnHead || findings.TestCommandRan && findings.TestedHeadSHA == headSHA
+			state.hadDelta = state.hadDelta || findings.TestMode == "delta" && findings.TestCommandRan
+			state.fullPassedOnHead = state.fullPassedOnHead || findings.TestMode == "full" && findings.TestCommandPassed && findings.TestedHeadSHA == headSHA
+		}
+		return state, nil
+	}
+	return state, nil
+}
+
+func finalFullTestRequired(sctx *pipeline.StepContext, headSHA string) (bool, error) {
+	state, err := configuredTestStateForHead(sctx, headSHA)
+	if err != nil {
+		return false, err
+	}
+	return state.hadDelta && !state.fullPassedOnHead, nil
 }
 
 // publishRunHead is the single guarded publication path for a run's head. Both

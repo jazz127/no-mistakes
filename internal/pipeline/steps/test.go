@@ -20,6 +20,42 @@ import (
 // TestStep runs baseline tests, gathers evidence for user intent, and optionally asks the agent to fix failures.
 type TestStep struct{}
 
+func configuredTestRunMode(sctx *pipeline.StepContext) (mode, since string, fullAlreadyPassed bool) {
+	mode = "full"
+	if sctx == nil || sctx.DB == nil || sctx.StepResultID == "" || sctx.Run == nil {
+		return mode, "", false
+	}
+	rounds, err := sctx.DB.GetRoundsByStep(sctx.StepResultID)
+	if err != nil {
+		return mode, "", false
+	}
+	lastTestedHead := ""
+	for _, round := range rounds {
+		if round.FindingsJSON == nil {
+			continue
+		}
+		findings, err := types.ParseFindingsJSON(*round.FindingsJSON)
+		if err != nil || findings.TestMode == "" || findings.TestedHeadSHA == "" {
+			continue
+		}
+		lastTestedHead = findings.TestedHeadSHA
+		if findings.TestMode == "full" && findings.TestCommandPassed && findings.TestedHeadSHA == sctx.Run.HeadSHA {
+			fullAlreadyPassed = true
+		}
+	}
+	if sctx.ForceFullTest || fullAlreadyPassed || lastTestedHead == "" {
+		return "full", "", fullAlreadyPassed
+	}
+	return "delta", lastTestedHead, false
+}
+
+func testModeLogLine(mode, since string) string {
+	if mode == "delta" && since != "" {
+		return fmt.Sprintf("configured test command mode: delta (since %s)", since)
+	}
+	return "configured test command mode: full"
+}
+
 var _ pipeline.ApprovalOverrideVerifier = (*TestStep)(nil)
 
 func (s *TestStep) Name() types.StepName { return types.StepTest }
@@ -132,6 +168,11 @@ Previous test findings to address:
 	}
 
 	testCmd := sctx.Config.Commands.Test
+	testMode, testSince, priorFullPassed := configuredTestRunMode(sctx)
+	testCommandRan := false
+	testCommandPassed := false
+	baseTestMode := ""
+	baseTestSHA := ""
 	tested := []string{}
 	var baselineResults []checkResult
 	var baselineFindings []Finding
@@ -144,14 +185,31 @@ Previous test findings to address:
 		}
 		declareStepCommandOverrides(sctx, "test")
 		if testCmd != "" {
-			sctx.Log(fmt.Sprintf("running tests: %s", testCmd))
+			if priorFullPassed && !sctx.ForceFullTest {
+				testCommandRan = false
+				testCommandPassed = true
+				sctx.Log(fmt.Sprintf("configured test command already passed on head %s; reusing full result", shortSHA(sctx.Run.HeadSHA)))
+			} else {
+				sctx.Log(testModeLogLine(testMode, testSince))
+				sctx.Log(fmt.Sprintf("running tests: %s", testCmd))
+				testCommandRan = true
+			}
 		}
-		output, results, err := runConfiguredChecks(sctx, "test", testCmd)
+		commandToRun := testCmd
+		if priorFullPassed && !sctx.ForceFullTest {
+			commandToRun = ""
+		}
+		output, results, err := runConfiguredChecksForTest(sctx, commandToRun, testMode, testSince)
 		if err != nil {
 			logConfiguredCommandOutput(sctx, output, types.StepTest)
 			return nil, fmt.Errorf("run test command: %w", err)
 		}
 		baselineResults = results
+		if priorFullPassed && !sctx.ForceFullTest {
+			testCommandPassed = true
+		} else {
+			testCommandPassed = testCmd == "" || len(results) > 0 && results[0].ExitCode == 0 && !results[0].Local
+		}
 		for _, result := range results {
 			tested = append(tested, result.Command)
 		}
@@ -173,12 +231,18 @@ Previous test findings to address:
 					return nil, err
 				}
 				attributionSection = attribution.render()
+				if attribution.unavailable == "" {
+					baseTestMode = "full"
+					baseTestSHA = baseSHA
+				}
 				baselineSummary = attributionSection + "\n\n" + baselineSummary
 			}
 		}
 	}
 	if repairCut != nil {
-		return testAgentTimeoutOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode), nil
+		outcome := testAgentTimeoutOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode)
+		outcome.Findings = withTestCommandMode(outcome.Findings, testMode, testSince, testCommandRan, testCommandPassed, baseTestMode, baseTestSHA)
+		return outcome, nil
 	}
 
 	evidenceDir := testEvidenceDir(sctx)
@@ -307,6 +371,7 @@ Rules:
 		if errors.Is(err, errTestAgentTimeout) {
 			outcome := testAgentTimeoutOutcome(sctx, err, startHead, baselineFindings, baselineSummary, baselineExitCode)
 			outcome.FixSummary = fixSummary
+			outcome.Findings = withTestCommandMode(outcome.Findings, testMode, testSince, testCommandRan, testCommandPassed, baseTestMode, baseTestSHA)
 			return outcome, nil
 		}
 		return nil, err
@@ -315,6 +380,12 @@ Rules:
 		findings.Tested = append(append([]string{}, tested...), findings.Tested...)
 	}
 	findings.TestedHeadSHA = sctx.Run.HeadSHA
+	findings.TestMode = testMode
+	findings.TestSinceSHA = testSince
+	findings.TestCommandRan = testCommandRan
+	findings.TestCommandPassed = testCommandPassed
+	findings.BaseTestMode = baseTestMode
+	findings.BaseTestHeadSHA = baseTestSHA
 	findings.Items = append(baselineFindings, findings.Items...)
 	if baselineSummary != "" {
 		findings.Summary = strings.TrimSpace(strings.Join([]string{baselineSummary, findings.Summary}, "\n"))
@@ -346,6 +417,24 @@ Rules:
 		ExitCode:      baselineExitCode,
 		FixSummary:    fixSummary,
 	}, nil
+}
+
+func withTestCommandMode(raw, mode, since string, ran, passed bool, baseMode, baseSHA string) string {
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return raw
+	}
+	findings.TestMode = mode
+	findings.TestSinceSHA = since
+	findings.TestCommandRan = ran
+	findings.TestCommandPassed = passed
+	findings.BaseTestMode = baseMode
+	findings.BaseTestHeadSHA = baseSHA
+	encoded, err := json.Marshal(findings)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
 }
 
 // testAnalyzerMaxAttempts is the number of evidence-analyzer invocations
