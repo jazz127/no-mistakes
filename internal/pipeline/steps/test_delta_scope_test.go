@@ -44,20 +44,16 @@ func TestConfiguredTestRunMode_FirstRunIsFullAndFixRerunIsDelta(t *testing.T) {
 func TestConfiguredTestCommandReceivesModeAndSince(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
-	modePath := filepath.Join(t.TempDir(), "mode.txt")
-	command := testModeReceiptCommand(false) + ` > "` + modePath + `"`
+	command := testModeReceiptCommand(t, false, "")
 	for _, tc := range []struct {
 		mode, since, want string
 	}{{"full", "", "full,unset"}, {"delta", "abc123", "delta,abc123"}} {
-		if out, checks, err := runConfiguredChecksForTest(sctx, command, tc.mode, tc.since); err != nil || len(checks) != 1 || checks[0].ExitCode != 0 {
+		out, checks, err := runConfiguredChecksForTest(sctx, command, tc.mode, tc.since)
+		if err != nil || len(checks) != 1 || checks[0].ExitCode != 0 {
 			t.Fatalf("run %s command: %v, checks=%+v output=%q", tc.mode, err, checks, out)
 		}
-		got, err := os.ReadFile(modePath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.TrimSpace(string(got)) != tc.want {
-			t.Errorf("%s environment = %q, want %q", tc.mode, got, tc.want)
+		if strings.TrimSpace(out) != tc.want {
+			t.Errorf("%s environment = %q, want %q", tc.mode, out, tc.want)
 		}
 	}
 }
@@ -68,7 +64,7 @@ func TestConfiguredTestCommandReceivesModeAndSince(t *testing.T) {
 // executions. Only the evidence-agent response is simulated.
 func TestConfiguredTestCommandLifecycle(t *testing.T) {
 	dir, baseSHA, firstHead := setupGitRepo(t)
-	receipt := filepath.Join(t.TempDir(), "commands.txt")
+	receipt := filepath.Join(t.TempDir(), "command receipts.txt")
 	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		if opts.Purpose == "test-fix" {
 			return &agent.Result{Output: json.RawMessage(`{"summary":"No changes applied"}`)}, nil
@@ -76,7 +72,7 @@ func TestConfiguredTestCommandLifecycle(t *testing.T) {
 		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"Command environment integration test","tested":["configured shell command"],"testing_summary":"Mode contract exercised with a simulated evidence agent","artifacts":[],"scenarios":[{"name":"evidence agent boundary","result":"untested","live":false,"surface":"simulated","evidence":"mockAgent","reason":"This integration test substitutes only the evidence agent"}],"verdict":"inconclusive"}`)}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, firstHead, config.Commands{
-		Test: testModeReceiptCommand(true) + testModeReceiptRedirect("MODE_RECEIPT"),
+		Test: testModeReceiptCommand(t, true, "MODE_RECEIPT"),
 	})
 	sctx.Env = []string{"MODE_RECEIPT=" + receipt, "NO_MISTAKES_TEST_MODE=inherited", "NO_MISTAKES_TEST_SINCE=stale-inherited-head"}
 	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
@@ -178,9 +174,9 @@ func TestConfiguredTestCommandChangeInvalidatesReceipts(t *testing.T) {
 					return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
 				}}
 				sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{
-					Test: testModeReceiptCommand(false) + testModeReceiptRedirect("TEST_RECEIPT"),
+					Test: testModeReceiptCommand(t, false, "TEST_RECEIPT"),
 				})
-				receipt := filepath.Join(t.TempDir(), "commands.txt")
+				receipt := filepath.Join(t.TempDir(), "command receipts.txt")
 				sctx.Env = []string{"TEST_RECEIPT=" + receipt}
 				sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
 				if err != nil {
@@ -303,7 +299,7 @@ func TestBaseAttributionCommandReceivesFullMode(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = []string{"NO_MISTAKES_TEST_MODE=delta", "NO_MISTAKES_TEST_SINCE=stale-head"}
-	output, code, err := runTestCommandOnBase(sctx, testModeReceiptCommand(true), baseSHA)
+	output, code, err := runTestCommandOnBase(sctx, testModeReceiptCommand(t, true, ""), baseSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,10 +398,10 @@ func TestPushStepRecordsFormatterHeadBeforeTestRestarts(t *testing.T) {
 				return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
 			}}
 			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{
-				Test:   testModeReceiptCommand(false) + testModeReceiptRedirect("TEST_RECEIPT"),
+				Test:   testModeReceiptCommand(t, false, "TEST_RECEIPT"),
 				Format: "echo formatted > feature.txt",
 			})
-			receipt := filepath.Join(t.TempDir(), "commands.txt")
+			receipt := filepath.Join(t.TempDir(), "command receipts.txt")
 			sctx.Env = []string{"TEST_RECEIPT=" + receipt}
 			upstream := t.TempDir()
 			gitCmd(t, upstream, "init", "--bare")
@@ -505,10 +501,10 @@ func TestConfiguredTestFinalFullRequestIsConsumedByOneAttempt(t *testing.T) {
 	}}
 	command := `test -f "$TEST_SUCCESS_FILE"`
 	if runtime.GOOS == "windows" {
-		command = `if exist "%TEST_SUCCESS_FILE%" (exit /b 0) else (exit /b 1)`
+		command = testModeBatchCommand(t, `if exist "%TEST_SUCCESS_FILE%" (exit /b 0) else (exit /b 1)`)
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: command})
-	successFile := filepath.Join(t.TempDir(), "passed")
+	successFile := filepath.Join(t.TempDir(), "test passed")
 	sctx.Env = []string{"TEST_SUCCESS_FILE=" + successFile}
 	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
 	if err != nil {
@@ -717,24 +713,39 @@ func testStringPtr(value string) *string { return &value }
 
 // These fixtures execute the mode/since contract through the platform's actual
 // shell, including an unset SINCE and (where requested) the checkout's real HEAD.
-func testModeReceiptCommand(includeHead bool) string {
+func testModeReceiptCommand(t *testing.T, includeHead bool, receiptVariable string) string {
+	t.Helper()
+	redirect := ""
 	if runtime.GOOS == "windows" {
 		head, prefix := "", ""
 		if includeHead {
-			prefix = `for /f %h in ('git rev-parse HEAD') do @`
-			head = ",%h"
+			prefix = `for /f %%h in ('git rev-parse HEAD') do @`
+			head = ",%%h"
 		}
-		return "(" + prefix + `if defined NO_MISTAKES_TEST_SINCE (echo %NO_MISTAKES_TEST_MODE%,%NO_MISTAKES_TEST_SINCE%` + head + `) else (echo %NO_MISTAKES_TEST_MODE%,unset` + head + "))"
+		if receiptVariable != "" {
+			redirect = ` >> "%` + receiptVariable + `%"`
+		}
+		return testModeBatchCommand(t, "("+prefix+`if defined NO_MISTAKES_TEST_SINCE (echo %NO_MISTAKES_TEST_MODE%,%NO_MISTAKES_TEST_SINCE%`+head+`) else (echo %NO_MISTAKES_TEST_MODE%,unset`+head+"))"+redirect)
+	}
+	if receiptVariable != "" {
+		redirect = ` >> "$` + receiptVariable + `"`
 	}
 	if includeHead {
-		return `printf '%s,%s,%s\n' "$NO_MISTAKES_TEST_MODE" "${NO_MISTAKES_TEST_SINCE-unset}" "$(git rev-parse HEAD)"`
+		return `printf '%s,%s,%s\n' "$NO_MISTAKES_TEST_MODE" "${NO_MISTAKES_TEST_SINCE-unset}" "$(git rev-parse HEAD)"` + redirect
 	}
-	return `printf '%s,%s\n' "$NO_MISTAKES_TEST_MODE" "${NO_MISTAKES_TEST_SINCE-unset}"`
+	return `printf '%s,%s\n' "$NO_MISTAKES_TEST_MODE" "${NO_MISTAKES_TEST_SINCE-unset}"` + redirect
 }
 
-func testModeReceiptRedirect(variable string) string {
-	if runtime.GOOS == "windows" {
-		return ` >> "%` + variable + `%"`
+// Keep quotes in a batch file: Go's argv escaping is not cmd.exe quoting.
+// PATH lookup also keeps the script out of checkouts committed by repair tests
+// and makes it available in the separate base-attribution checkout.
+func testModeBatchCommand(t *testing.T, script string) string {
+	t.Helper()
+	dir := t.TempDir()
+	const name = "test-mode-command.cmd"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("@echo off\r\n"+script+"\r\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	return ` >> "$` + variable + `"`
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return "call " + name
 }
