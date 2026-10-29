@@ -10,9 +10,10 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// errAgentCommitsNotLinear marks agent commits that are not a plain chain of
-// single-parent commits on the recorded head, so their messages cannot be
-// rewritten without restructuring history.
+// errAgentCommitsNotLinear marks history outside the supported first-parent
+// chain on the recorded head. CI's merge strategy also accepts merges whose
+// second parent is an ancestor of the targeted base; other merge shapes cannot
+// be rewritten without restructuring history.
 var errAgentCommitsNotLinear = errors.New("agent commits are not a linear chain from the recorded head")
 
 // conformAgentCommits applies the repository's commit settings to commits a fix
@@ -23,8 +24,10 @@ var errAgentCommitsNotLinear = errors.New("agent commits are not a linear chain 
 // The rewrite is anchored to the head the run has recorded, the same anchor
 // assertPipelineHeadContinuity and ciHeadAwaitsRecording use: every commit above
 // sctx.Run.HeadSHA is work the pipeline has not recorded yet, including commits
-// an earlier failed agent turn left behind. Trees and authors are kept, and
-// HEAD moves with a compare-and-swap against the head observed. An
+// an earlier failed agent turn left behind. Accepted CI base merges keep their
+// messages, and already-published CI commits are left intact so recovery can
+// finish recording their publication. Trees and authors are kept, and HEAD
+// moves with a compare-and-swap against the head observed. An
 // unexpected shape or a git failure returns an error with the agent's commits
 // untouched, so the change is never dropped and never published unshaped.
 func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, render func() (string, error)) error {
