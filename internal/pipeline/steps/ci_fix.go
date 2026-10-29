@@ -823,6 +823,36 @@ func (s *CIStep) commitRepairOnBase(sctx *pipeline.StepContext, summary string, 
 	return s.recordRepair(sctx, headSHA)
 }
 
+func (s *CIStep) reconcileRetainedRepair(sctx *pipeline.StepContext, pr *scm.PR) (ciRepairResult, error) {
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil || run == nil {
+		return ciRepairResult{}, err
+	}
+	pending, err := sctx.DB.RunTestRestartPending(sctx.Run.ID)
+	if err != nil {
+		return ciRepairResult{}, err
+	}
+	head, err := stepGitHeadSHA(sctx)
+	if err != nil {
+		return ciRepairResult{}, err
+	}
+	if !pending && !ciHeadAwaitsRecording(sctx, head) {
+		return ciRepairResult{}, nil
+	}
+	if rebaseInProgress(sctx.Ctx, sctx.WorkDir) || mergeInProgress(sctx.Ctx, sctx.WorkDir) {
+		return ciRepairResult{}, fmt.Errorf("retained CI repair has an unfinished git integration")
+	}
+	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+		return ciRepairResult{}, err
+	}
+	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
+	head, err = ciRetainedRepairHead(sctx, pr)
+	if err != nil {
+		return ciRepairResult{}, fmt.Errorf("normalize retained CI repair: %w", err)
+	}
+	return s.recordRepair(sctx, head)
+}
+
 func ciRetainedRepairHead(sctx *pipeline.StepContext, pr *scm.PR) (string, error) {
 	baseBranch := effectivePRBaseBranch(sctx)
 	if pr != nil && strings.TrimSpace(pr.BaseBranch) != "" {

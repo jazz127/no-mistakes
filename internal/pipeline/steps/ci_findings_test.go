@@ -702,6 +702,11 @@ func TestCIStep_PublishedRepairPropagatesMarkRunningFailure(t *testing.T) {
 func TestCIStep_PublishedRepairResumesMonitoringAndWaitsForTheRerun(t *testing.T) {
 	t.Parallel()
 	f := newCIRepairFixture(t, false, writeCIFix)
+	for i, entry := range f.sctx.Env {
+		if strings.HasPrefix(entry, "FAKE_CLI_PR_HEAD_SHA=") {
+			f.sctx.Env[i] = "FAKE_CLI_PR_HEAD_SHA=deadbeef"
+		}
+	}
 	marked := 0
 	f.sctx.MarkRunning = func() error { marked++; return nil }
 

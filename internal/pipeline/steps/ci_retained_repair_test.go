@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -217,5 +218,120 @@ func TestCIResumedRepairSettlesAPartialPublication(t *testing.T) {
 	}
 	if f.localHead(t) != repairHead || f.remoteHead(t) != repairHead || run.HeadSHA != repairHead || run.LastPushedSHA == nil || *run.LastPushedSHA != repairHead {
 		t.Fatalf("recovery did not settle the exact published repair: %+v", run)
+	}
+}
+
+func TestCIResumedRepairSettlesRetainedWorkBeforeGreenReadiness(t *testing.T) {
+	for _, revalidate := range []bool{false, true} {
+		for _, fixing := range []bool{false, true} {
+			for _, state := range []string{"crash", "timeout", "partial-publication"} {
+				t.Run(fmt.Sprintf("%s/revalidate=%t/fixing=%t", state, revalidate, fixing), func(t *testing.T) {
+					f := newCIRepairFixture(t, revalidate, nil)
+					f.sctx.Config.Commit.FixMessage = "retained repair"
+					f.sctx.Config.CI.ReleaseAfterChecksPass = true
+					writeCIFix(f.dir)
+					gitCmd(t, f.dir, "add", "-A")
+					gitCmd(t, f.dir, "commit", "-m", "retained repair")
+					head := f.localHead(t)
+					step := &CIStep{}
+					if state == "timeout" {
+						park := step.ciFixAgentBudgetOutcome(f.sctx, nil, "test", pipeline.ErrAgentTimeout)
+						if park == nil || !park.NeedsApproval || f.sctx.Run.HeadSHA != head || f.remoteHead(t) != f.headSHA {
+							t.Fatalf("timeout failed to park retained local work: %+v", park)
+						}
+					}
+					if state == "partial-publication" {
+						gitCmd(t, f.dir, "push", "origin", "feature")
+					}
+					for i, entry := range f.sctx.Env {
+						if strings.HasPrefix(entry, "FAKE_CLI_CHECKS=") {
+							f.sctx.Env[i] = `FAKE_CLI_CHECKS=[{"name":"test","state":"SUCCESS","bucket":"pass"}]`
+						}
+					}
+					f.sctx.Fixing = fixing
+					f.sctx.PreviousFindings = ciGateFindingsJSON("test")
+					f.sctx.Agent = &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+						t.Fatal("green published checks authorized another fixer")
+						return nil, nil
+					}}
+					markedRunning := false
+					f.sctx.MarkRunning = func() error { markedRunning = true; return nil }
+					f.sctx.CIReadinessChanged = func(ready, _ bool) {
+						if ready {
+							t.Error("stale published checks made the retained head ready")
+						}
+					}
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					f.sctx.Ctx = ctx
+					step.waitForNextPoll = func(context.Context, time.Duration) error { cancel(); return ctx.Err() }
+					outcome, err := step.Execute(f.sctx)
+					run, readErr := f.sctx.DB.GetRun(f.sctx.Run.ID)
+					if readErr != nil || run == nil || run.HeadSHA != head || f.localHead(t) != head || run.PushActive {
+						t.Fatalf("retained custody was not settled: (%+v, %v)", run, readErr)
+					}
+					if revalidate || state == "timeout" {
+						if err != nil || outcome == nil || outcome.RestartFrom != types.StepReview || outcome.CIReadyNoCI != nil || markedRunning || run.ReviewApprovedHeadSHA != nil || run.LastPushedSHA == nil || *run.LastPushedSHA != f.headSHA {
+							t.Fatalf("retained repair bypassed revalidation: (%+v, %v)\n%s", outcome, err, f.log())
+						}
+						wantRemote := f.headSHA
+						if state == "partial-publication" {
+							wantRemote = head
+						}
+						if f.remoteHead(t) != wantRemote {
+							t.Fatal("revalidation changed the published head")
+						}
+						return
+					}
+					if !errors.Is(err, context.Canceled) || outcome != nil || !markedRunning || f.remoteHead(t) != head || run.LastPushedSHA == nil || *run.LastPushedSHA != head {
+						t.Fatalf("publication was not settled before waiting for current checks: (%+v, %v)\n%s", outcome, err, f.log())
+					}
+					for i, entry := range f.sctx.Env {
+						if strings.HasPrefix(entry, "FAKE_CLI_PR_HEAD_SHA=") {
+							f.sctx.Env[i] = "FAKE_CLI_PR_HEAD_SHA=" + head
+						}
+					}
+					f.sctx.Ctx = context.Background()
+					f.sctx.Fixing = false
+					outcome, err = step.Execute(f.sctx)
+					if err != nil || outcome == nil || outcome.CIReadyNoCI == nil || *outcome.CIReadyNoCI {
+						t.Fatalf("current green checks did not release the settled head: (%+v, %v)\n%s", outcome, err, f.log())
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCIResumedRepairRecoveryRefusesMovedRemote(t *testing.T) {
+	f := newCIRepairFixture(t, false, nil)
+	f.sctx.Config.CI.ReleaseAfterChecksPass = true
+	writeCIFix(f.dir)
+	gitCmd(t, f.dir, "add", "-A")
+	gitCmd(t, f.dir, "commit", "-m", "retained repair")
+	gitCmd(t, f.dir, "checkout", "-b", "external", f.headSHA)
+	writeFile(t, f.dir, "external.txt", "independent remote work\n")
+	gitCmd(t, f.dir, "add", "-A")
+	gitCmd(t, f.dir, "commit", "-m", "external update")
+	moved := f.localHead(t)
+	gitCmd(t, f.dir, "push", "origin", moved+":refs/heads/feature")
+	gitCmd(t, f.dir, "checkout", "feature")
+	for i, entry := range f.sctx.Env {
+		if strings.HasPrefix(entry, "FAKE_CLI_CHECKS=") {
+			f.sctx.Env[i] = `FAKE_CLI_CHECKS=[{"name":"test","state":"SUCCESS","bucket":"pass"}]`
+		}
+		if strings.HasPrefix(entry, "FAKE_CLI_PR_HEAD_SHA=") {
+			f.sctx.Env[i] = "FAKE_CLI_PR_HEAD_SHA=" + moved
+		}
+	}
+	f.sctx.Fixing = true
+	f.sctx.PreviousFindings = ciGateFindingsJSON("test")
+	f.sctx.Agent = &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		t.Fatal("moved remote authorized another fixer")
+		return nil, nil
+	}}
+	outcome, err := (&CIStep{}).Execute(f.sctx)
+	if err == nil || outcome != nil || f.remoteHead(t) != moved || f.sctx.Run.HeadSHA != f.headSHA {
+		t.Fatalf("recovery bypassed the moved-remote guard: (%+v, %v)\n%s", outcome, err, f.log())
 	}
 }

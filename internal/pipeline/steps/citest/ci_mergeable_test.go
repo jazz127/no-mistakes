@@ -545,7 +545,7 @@ func TestCIStep_GitHubHeadObservationAcrossLookupFailures(t *testing.T) {
 					remembered = true
 				}
 			}
-			if remembered == lateMovement {
+			if remembered {
 				t.Fatalf("timeout = %s, late movement = %v", outcome.Findings, lateMovement)
 			}
 			data, err := os.ReadFile(indexPath)

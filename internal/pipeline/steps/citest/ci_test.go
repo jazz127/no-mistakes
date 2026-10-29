@@ -2236,14 +2236,9 @@ func TestCIStep_CancelledCheckAmongPassingChecksEscalatesInsteadOfPollingForever
 	}
 }
 
-// Readiness is read from the PR's live check rollup on every poll, so it always
-// describes the commit the forge currently has for that PR. No recorded head
-// SHA gates it: a run whose own record still names the pre-advance commit must
-// still recognize the green terminal state the forge published for the head the
-// pipeline last pushed.
 func TestCIStep_GreenChecksAtAdvancedHeadAreRecognizedWhileRunTracksOlderHead(t *testing.T) {
 	t.Parallel()
-	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+	dir, _, baseSHA, headSHA := setupCIRerunRepo(t)
 
 	// The branch advances past the commit the run still records, the way a
 	// pipeline fix commit does mid-run.
@@ -2256,19 +2251,21 @@ func TestCIStep_GreenChecksAtAdvancedHeadAreRecognizedWhileRunTracksOlderHead(t 
 		t.Fatal("expected the published head to advance past the recorded head")
 	}
 
-	env := stepstest.FakeCIGHSequence(t, "OPEN", []string{
-		`[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"test","state":"SUCCESS","bucket":"pass"}]`,
-	})
+	env := stepstest.FakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"test","state":"SUCCESS","bucket":"pass"}]`)
 
 	prURL := "https://github.com/test/repo/pull/42"
 	ag := &stepstest.MockAgent{AgentName: "test"}
 	sctx := stepstest.NewTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.Run.PRURL = &prURL
-	sctx.Repo.UpstreamURL = upstream
+	sctx.Repo.UpstreamURL = "https://github.com/test/repo"
 	sctx.Config.CITimeout = 30 * time.Minute
 	sctx.Config.AutoFix = config.AutoFix{CI: 3}
 	sctx.Config.CI = config.CI{RerunTransient: config.DefaultCIRerunTransient}
+	if err := sctx.DB.UpdateRunReviewApprovedHeadSHA(sctx.Run.ID, headSHA); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Env = append(sctx.Env, `FAKE_CLI_PR_LIST_JSON=[{"number":42,"url":"https://github.com/test/repo/pull/42","baseRefName":"main"}]`)
 
 	var logs []string
 	sctx.Log = func(s string) { logs = append(logs, s) }
@@ -2299,6 +2296,9 @@ func TestCIStep_GreenChecksAtAdvancedHeadAreRecognizedWhileRunTracksOlderHead(t 
 	}
 	if dbRun.CIReadyAt == nil {
 		t.Fatal("green checks on the PR's current head must record CI readiness")
+	}
+	if dbRun.HeadSHA != advanced || dbRun.LastPushedSHA == nil || *dbRun.LastPushedSHA != advanced {
+		t.Fatalf("readiness preceded settling the advanced publication: %+v", dbRun)
 	}
 }
 
