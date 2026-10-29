@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -521,6 +522,131 @@ func TestCIStep_CarryReviewOnReplay_StaleChecksOnPendingCarryRestartTest(t *test
 	}
 	if f.remoteHead(t) != f.reviewedHead {
 		t.Fatalf("remote moved to %s; the carried head was published before Test ran", f.remoteHead(t))
+	}
+}
+
+type pendingCarryRepairHost struct {
+	scm.Host
+	snapshots  int
+	logTargets []scm.CheckTarget
+}
+
+func (h *pendingCarryRepairHost) GetChecks(context.Context, *scm.PR) ([]scm.Check, error) {
+	h.snapshots++
+	return []scm.Check{{Name: "test", Bucket: scm.CheckBucketFail}}, nil
+}
+
+func (h *pendingCarryRepairHost) FetchFailedCheckTargetLogs(_ context.Context, _ *scm.PR, _, _ string, targets []scm.CheckTarget) ([]scm.FailedCheckLog, error) {
+	h.logTargets = append(h.logTargets, targets...)
+	return nil, nil
+}
+
+func TestCIStep_CarryReviewOnReplay_PendingCarryFiltersOnlyFailingChecks(t *testing.T) {
+	for _, entry := range []string{"selected-repair", "fixer"} {
+		for _, independent := range []string{"", types.FindingCategoryCIMergeConflict, types.FindingCategoryCIBehindBase, types.FindingCategoryCIReviewBot} {
+			t.Run(entry+"/"+independent, func(t *testing.T) {
+				f := newReplayFixture(t, true, false)
+				carried := f.carry(t)
+				selected := ciTargetsFor([]string{"test"}, false).Findings
+				selected.Summary = "stale-ci-check-marker"
+				selected.Items[0].Description = "stale-ci-check-marker"
+				if independent != "" {
+					finding := Finding{ID: "independent", Category: independent, Description: "independent-repair-marker", Action: types.ActionAutoFix}
+					if independent == types.FindingCategoryCIReviewBot {
+						finding.Check = "review-bot"
+					}
+					selected.Items = append(selected.Items, finding)
+				}
+				encoded, err := types.MarshalFindingsJSON(selected)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.sctx.PreviousFindings = encoded
+				calls := 0
+				f.sctx.Agent = &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+					calls++
+					if strings.Contains(opts.Prompt, "stale-ci-check-marker") || strings.Contains(opts.Prompt, `"check":"test"`) {
+						t.Fatal("pending carry delivered an old failing check to the fixer")
+					}
+					if !strings.Contains(opts.Prompt, "independent-repair-marker") {
+						t.Fatal("pending carry dropped the independent repair")
+					}
+					return &agent.Result{Output: []byte(`{"summary":"independent repair needs no edits","code_change_needed":false}`)}, nil
+				}}
+				host, reason := buildHost(f.sctx, scm.ProviderGitHub)
+				if host == nil {
+					t.Fatal(reason)
+				}
+				observer := &pendingCarryRepairHost{Host: host}
+				pr := &scm.PR{Number: "42", URL: *f.sctx.Run.PRURL}
+				step := &CIStep{}
+				if entry == "selected-repair" {
+					_, err = step.repairFromFindings(f.sctx, observer, pr)
+				} else {
+					_, err = step.autoFixCI(f.sctx, observer, pr, ciFixTargetsFromFindings(selected))
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantCalls := 1
+				if independent == "" {
+					wantCalls = 0
+				}
+				if calls != wantCalls || observer.snapshots != 0 {
+					t.Fatalf("fixer calls=%d snapshots=%d, want calls=%d snapshots=0", calls, observer.snapshots, wantCalls)
+				}
+				for _, target := range observer.logTargets {
+					if target.Name == "test" {
+						t.Fatal("pending carry requested logs for an old failing check")
+					}
+				}
+				if f.localHead(t) != carried || f.approval(t) != carried || f.remoteHead(t) != f.reviewedHead || !f.testRestartPending(t) {
+					t.Fatal("pending carry lost its approval or was published before Test")
+				}
+			})
+		}
+	}
+}
+
+func TestCIStep_CarryReviewOnReplay_PendingCarryMergeResolverGetsOnlyIndependentTargets(t *testing.T) {
+	f := newReplayFixture(t, true, false)
+	f.carry(t)
+	f.sctx.Config.Rebase.Strategy = config.RebaseStrategyMerge
+	gitCmd(t, f.dir, "checkout", "main")
+	writeFile(t, f.dir, "feature.txt", "new base change\n")
+	gitCmd(t, f.dir, "add", "-A")
+	gitCmd(t, f.dir, "commit", "-m", "base now conflicts with the carried head")
+	gitCmd(t, f.dir, "push", "origin", "main")
+	gitCmd(t, f.dir, "checkout", "feature")
+	selected := ciTargetsFor([]string{"test"}, true).Findings
+	selected.Items[0].Description = "stale-ci-check-marker"
+	var err error
+	f.sctx.PreviousFindings, err = types.MarshalFindingsJSON(selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	f.sctx.Agent = &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		calls++
+		if strings.Contains(opts.Prompt, "stale-ci-check-marker") || strings.Contains(opts.Prompt, `"check":"test"`) {
+			t.Fatal("pending carry delivered the old check to the merge resolver")
+		}
+		writeFile(t, f.dir, "feature.txt", "new base change\nfeature\n")
+		gitCmd(t, f.dir, "add", "-A")
+		gitCmd(t, f.dir, "commit", "--no-edit")
+		return &agent.Result{Output: []byte(`{"summary":"kept both sides"}`)}, nil
+	}}
+	host, reason := buildHost(f.sctx, scm.ProviderGitHub)
+	if host == nil {
+		t.Fatal(reason)
+	}
+	observer := &pendingCarryRepairHost{Host: host}
+	outcome, err := (&CIStep{}).repairFromFindings(f.sctx, observer, &scm.PR{Number: "42", URL: *f.sctx.Run.PRURL})
+	if err != nil || outcome == nil || outcome.RestartFrom != types.StepReview {
+		t.Fatalf("independent merge = (%+v, %v), want Review revalidation", outcome, err)
+	}
+	if calls != 1 || observer.snapshots != 0 || len(observer.logTargets) != 0 || f.approval(t) != "" || f.remoteHead(t) != f.reviewedHead {
+		t.Fatal("independent merge lost its validation or stale-check boundary")
 	}
 }
 

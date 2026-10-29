@@ -23,20 +23,23 @@ var errAgentCommitsNotLinear = errors.New("agent commits are not a linear chain 
 // The rewrite is anchored to the head the run has recorded, the same anchor
 // assertPipelineHeadContinuity and ciHeadAwaitsRecording use: every commit above
 // sctx.Run.HeadSHA is work the pipeline has not recorded yet, including commits
-// an earlier failed agent turn left behind. Only a linear, non-merge chain on
-// that head is rewritten. Trees, authors and parents are kept (only the message
-// changes) and HEAD moves with a compare-and-swap against the head observed. An
+// an earlier failed agent turn left behind. Trees and authors are kept, and
+// HEAD moves with a compare-and-swap against the head observed. An
 // unexpected shape or a git failure returns an error with the agent's commits
 // untouched, so the change is never dropped and never published unshaped.
 func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, render func() (string, error)) error {
-	return conformAgentCommitsFrom(sctx, stepName, sctx.Run.HeadSHA, render)
+	base := ""
+	if stepName == types.StepCI && mergesMovedBase(sctx) {
+		base = "refs/remotes/origin/" + effectivePRBaseBranch(sctx)
+	}
+	return conformAgentCommitsOnBase(sctx, stepName, base, render)
 }
 
-// conformAgentCommitsFrom shapes only commits above anchor. CI may supply the
-// exact head of a base merge already proven by mergeWithAgent; that pipeline
-// merge and its imported base commits must retain their history.
-func conformAgentCommitsFrom(sctx *pipeline.StepContext, stepName types.StepName, anchor string, render func() (string, error)) error {
-	anchor = strings.TrimSpace(anchor)
+func conformAgentCommitsOnBase(sctx *pipeline.StepContext, stepName types.StepName, base string, render func() (string, error)) error {
+	anchor := strings.TrimSpace(sctx.Run.HeadSHA)
+	if stepName != types.StepCI || !mergesMovedBase(sctx) {
+		base = ""
+	}
 	if anchor == "" {
 		return nil
 	}
@@ -66,7 +69,7 @@ func conformAgentCommitsFrom(sctx *pipeline.StepContext, stepName types.StepName
 		// is not the agent adding commits; continuity checks own that case.
 		return nil
 	}
-	chain, err := agentCommitChain(sctx, anchor, head)
+	chain, err := agentCommitChain(sctx, anchor, head, base)
 	if err != nil {
 		return fmt.Errorf("inspect %s agent commits: %w", stepName, err)
 	}
@@ -78,15 +81,20 @@ func conformAgentCommitsFrom(sctx *pipeline.StepContext, stepName types.StepName
 	parent, changed := anchor, false
 	published, resolvedPublished := -1, false
 	for i, sha := range chain {
-		info, err := stepGitRun(sctx, "show", "-s", "--date=raw", "--format=%T%x1f%an%x1f%ae%x1f%ad%x1f%B", sha)
+		info, err := stepGitRun(sctx, "show", "-s", "--date=raw", "--format=%P%x1f%T%x1f%an%x1f%ae%x1f%ad%x1f%B", sha)
 		if err != nil {
 			return fmt.Errorf("read %s agent commit %s: %w", stepName, sha, err)
 		}
-		fields := strings.SplitN(info, "\x1f", 5)
-		if len(fields) != 5 {
+		fields := strings.SplitN(info, "\x1f", 6)
+		if len(fields) != 6 {
 			return fmt.Errorf("read %s agent commit %s: unexpected git output", stepName, sha)
 		}
-		if !changed && strings.TrimSpace(fields[4]) == message {
+		parents := strings.Fields(fields[0])
+		commitMessage := message
+		if len(parents) == 2 {
+			commitMessage = strings.TrimSpace(fields[5])
+		}
+		if !changed && strings.TrimSpace(fields[5]) == commitMessage {
 			parent = sha
 			continue
 		}
@@ -104,8 +112,13 @@ func conformAgentCommitsFrom(sctx *pipeline.StepContext, stepName types.StepName
 			continue
 		}
 		changed = true
-		env := []string{"GIT_AUTHOR_NAME=" + fields[1], "GIT_AUTHOR_EMAIL=" + fields[2], "GIT_AUTHOR_DATE=" + fields[3]}
-		parent, err = stepGitRunEnv(sctx, env, "commit-tree", fields[0], "-p", parent, "-m", message)
+		env := []string{"GIT_AUTHOR_NAME=" + fields[2], "GIT_AUTHOR_EMAIL=" + fields[3], "GIT_AUTHOR_DATE=" + fields[4]}
+		args := []string{"commit-tree", fields[1], "-p", parent}
+		if len(parents) == 2 {
+			args = append(args, "-p", parents[1])
+		}
+		args = append(args, "-m", commitMessage)
+		parent, err = stepGitRunEnv(sctx, env, args...)
 		if err != nil {
 			return fmt.Errorf("rewrite %s agent commit %s: %w", stepName, sha, err)
 		}
@@ -156,10 +169,8 @@ func headDescendsFrom(sctx *pipeline.StepContext, anchor, head string) (bool, er
 	return err == nil, err
 }
 
-// agentCommitChain lists the commits in anchor..head oldest first and
-// requires them to be a single-parent chain that starts at anchor.
-func agentCommitChain(sctx *pipeline.StepContext, anchor, head string) ([]string, error) {
-	out, err := stepGitRun(sctx, "rev-list", "--reverse", "--parents", anchor+".."+head)
+func agentCommitChain(sctx *pipeline.StepContext, anchor, head, base string) ([]string, error) {
+	out, err := stepGitRun(sctx, "rev-list", "--first-parent", "--reverse", "--parents", anchor+".."+head)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +178,14 @@ func agentCommitChain(sctx *pipeline.StepContext, anchor, head string) ([]string
 	parent := anchor
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) != 2 || fields[1] != parent {
+		valid := len(fields) == 2
+		if len(fields) == 3 && base != "" {
+			valid, err = headDescendsFrom(sctx, fields[2], base)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if !valid || fields[1] != parent {
 			return nil, fmt.Errorf("commits %s..%s: %w; refusing to publish agent commits that bypass the commit settings", anchor, head, errAgentCommitsNotLinear)
 		}
 		chain = append(chain, fields[0])

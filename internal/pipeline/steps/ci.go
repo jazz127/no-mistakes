@@ -422,19 +422,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		return nil, fmt.Errorf("extract PR number: %w", err)
 	}
 	pr := &scm.PR{Number: prNumber, URL: prURL}
-	if retryRefusal {
-		if err := clearCIMonitorReadyForIssues(sctx); err != nil {
-			return nil, err
-		}
-		repair, err := s.retryProtectedPathRepair(sctx)
-		if err != nil {
-			return nil, err
-		}
-		retryRefusal = false
-		if repair.Revalidate {
-			return &pipeline.StepOutcome{RestartFrom: repair.restartFrom()}, nil
-		}
-	}
 	baseBranch := effectivePRBaseBranch(sctx)
 	// A resumed run may have a different trusted configuration than the run
 	// that created this PR. Re-read the forge record without a base filter so
@@ -451,6 +438,19 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	}
 	if strings.TrimSpace(pr.BaseBranch) != "" {
 		baseBranch = strings.TrimSpace(pr.BaseBranch)
+	}
+	if retryRefusal {
+		if err := clearCIMonitorReadyForIssues(sctx); err != nil {
+			return nil, err
+		}
+		repair, err := s.retryProtectedPathRepair(sctx, baseBranch)
+		if err != nil {
+			return nil, err
+		}
+		retryRefusal = false
+		if repair.Revalidate {
+			return &pipeline.StepOutcome{RestartFrom: repair.restartFrom()}, nil
+		}
 	}
 	if repairRequested {
 		repairOutcome, err := s.repairFromFindings(sctx, host, pr)

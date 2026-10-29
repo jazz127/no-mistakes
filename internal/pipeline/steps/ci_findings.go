@@ -546,6 +546,17 @@ func ciFixTargetsFromFindings(findings Findings) ciFixTargets {
 
 func (t ciFixTargets) empty() bool { return len(t.Findings.Items) == 0 }
 
+func (t ciFixTargets) withoutFailingChecks() ciFixTargets {
+	remaining := types.FindingsMetadata(t.Findings)
+	remaining.Summary = ""
+	for _, finding := range t.Findings.Items {
+		if finding.Category != types.FindingCategoryCICheck {
+			remaining.Items = append(remaining.Items, finding)
+		}
+	}
+	return ciFixTargetsFromFindings(remaining)
+}
+
 // withoutBaseIntegration returns the targets left once the pipeline itself has
 // integrated the base branch, so the fixer is never also asked to resolve the
 // conflict or behind-base condition that integration already settled.
