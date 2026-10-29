@@ -1,12 +1,60 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/scm/plugin"
 )
+
+type observedCheckHost struct {
+	scm.Host
+	head string
+	err  error
+}
+
+func (h observedCheckHost) GetChecks(_ context.Context, pr *scm.PR) ([]scm.Check, error) {
+	pr.ObservedHeadSHA = h.head
+	return []scm.Check{{Name: "build", Bucket: scm.CheckBucketPass}}, h.err
+}
+
+func TestGetCIChecksBindsSuccessfulObservationsAndPreservesProtocolErrors(t *testing.T) {
+	t.Parallel()
+	readErr := errors.New("check discovery failed")
+	for _, tc := range []struct {
+		name, requested, observed string
+		err                       error
+		wantMoved, wantHeadError  bool
+	}{
+		{name: "same head", requested: "head-a", observed: "head-a"},
+		{name: "unreported head", requested: "head-a"},
+		{name: "advanced head", requested: "head-a", observed: "head-b", wantMoved: true, wantHeadError: true},
+		{name: "older head", requested: "head-b", observed: "head-a", wantMoved: true, wantHeadError: true},
+		{name: "moved before read failure", requested: "head-a", observed: "head-b", err: readErr, wantMoved: true, wantHeadError: true},
+		{name: "same head read failure", requested: "head-a", observed: "head-a", err: readErr},
+		{name: "provider head refusal", requested: "head-a", err: scm.ErrHeadChanged, wantMoved: true, wantHeadError: true},
+		{name: "moved with protocol failure", requested: "head-a", observed: "head-b", err: plugin.ErrProtocol, wantMoved: true},
+		{name: "moved with plugin timeout", requested: "head-a", observed: "head-b", err: errors.Join(plugin.ErrProtocol, plugin.ErrTimeout), wantMoved: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pr := &scm.PR{HeadSHA: tc.requested}
+			_, observed, moved, err := getCIChecks(context.Background(), observedCheckHost{head: tc.observed, err: tc.err}, pr)
+			if observed != tc.observed || moved != tc.wantMoved || errors.Is(err, scm.ErrHeadChanged) != tc.wantHeadError {
+				t.Fatalf("observation = (%q, %t, %v)", observed, moved, err)
+			}
+			if !tc.wantHeadError && err != tc.err {
+				t.Fatalf("provider error changed: got %v, want %v", err, tc.err)
+			}
+			if pr.HeadSHA != tc.requested {
+				t.Fatal("check discovery changed the requested head")
+			}
+		})
+	}
+}
 
 func TestAllChecksPassedFailsClosed(t *testing.T) {
 	t.Parallel()

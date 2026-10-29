@@ -481,7 +481,9 @@ func getCIChecks(ctx context.Context, host scm.Host, pr *scm.PR) ([]scm.Check, s
 	checks, err := host.GetChecks(ctx, pr)
 	observedHead := pr.ObservedHeadSHA
 	moved := errors.Is(err, scm.ErrHeadChanged) || observedHead != "" && observedHead != requestedHead
-	if moved && err != nil && !pluginContractBroken(err) {
+	if moved && err == nil {
+		err = fmt.Errorf("%w: expected %s, observed %s", scm.ErrHeadChanged, requestedHead, observedHead)
+	} else if moved && !pluginContractBroken(err) {
 		err = fmt.Errorf("%w: %v", scm.ErrHeadChanged, err)
 	}
 	return checks, observedHead, moved, err

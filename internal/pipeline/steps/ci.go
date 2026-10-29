@@ -692,10 +692,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 
 		// Check CI status - wait for all checks to complete before escalating
 		pr.HeadSHA = sctx.Run.HeadSHA
-		checks, observedHead, moved, err := getCIChecks(ctx, host, pr)
-		if moved && err == nil {
-			err = fmt.Errorf("%w: expected %s, observed %s", scm.ErrHeadChanged, pr.HeadSHA, observedHead)
-		}
+		checks, observedHead, _, err := getCIChecks(ctx, host, pr)
 		if observedHead != "" && observedHead != lastCheckHeadSHA {
 			timeoutFailingChecks = nil
 			lastCheckHeadSHA = observedHead

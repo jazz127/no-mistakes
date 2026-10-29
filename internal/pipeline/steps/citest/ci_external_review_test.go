@@ -143,6 +143,39 @@ func TestCIStep_RequiredReviewApprovalCannotHideIncompleteReview(t *testing.T) {
 	}
 }
 
+func TestCIStep_ApprovalBindsGreenChecksAndRequiredReviewsToTheRunHead(t *testing.T) {
+	t.Parallel()
+	for _, required := range []bool{false, true} {
+		for _, moved := range []bool{false, true} {
+			t.Run(fmt.Sprintf("required=%t/moved=%t", required, moved), func(t *testing.T) {
+				t.Parallel()
+				dir, base, head := stepstest.SetupGitRepo(t)
+				sctx := stepstest.NewTestContextWithDBRecords(t, nil, dir, base, head, config.Commands{})
+				observed := head
+				if moved {
+					observed = strings.Repeat("b", 40)
+				}
+				sctx.Env = append(stepstest.FakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`),
+					"FAKE_CLI_PR_HEAD_SHA="+observed,
+					"FAKE_CLI_EXTERNAL_REVIEWS="+externalReviewPayload(observed, "completed", "success", ""))
+				if required {
+					sctx.Config.CI.RequiredReviews = []string{"coderabbit"}
+				}
+				url := "https://github.com/test/repo/pull/42"
+				sctx.Run.PRURL = &url
+				reason, err := (&steps.CIStep{}).VerifyApprovalOverride(sctx)
+				if moved {
+					if reason == "" || !strings.Contains(reason, head) || !strings.Contains(reason, observed) || errors.Is(err, pipeline.ErrApprovalBlocked) != required {
+						t.Fatalf("other head's green checks authorized approval: reason=%q err=%v", reason, err)
+					}
+				} else if err != nil || reason != "" {
+					t.Fatalf("current green checks did not allow ordinary approval: reason=%q err=%v", reason, err)
+				}
+			})
+		}
+	}
+}
+
 func TestCIStep_RequiredReviewGitLabIsExplicitlyUnsupported(t *testing.T) {
 	t.Parallel()
 	dir, base, head := stepstest.SetupGitRepo(t)
@@ -199,37 +232,48 @@ func TestCIStep_RequiredReviewPreservesGreptileAndDiscardsOnlyAuthenticatedOldCh
 	}
 }
 
-func TestCIStep_RequiredReviewClearsReadyOnNextHeadAndTimesOutMissing(t *testing.T) {
+func TestCIStep_RequiredReviewClearsReadyAndTimesOutAtTheRequestedHead(t *testing.T) {
 	t.Parallel()
-	dir, base, head := stepstest.SetupGitRepo(t)
-	sctx := stepstest.NewTestContextWithDBRecords(t, nil, dir, base, head, config.Commands{})
-	sctx.Env = append(stepstest.FakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`), "FAKE_CLI_PR_HEAD_SHA="+head, "FAKE_CLI_EXTERNAL_REVIEWS="+externalReviewPayload(head, "completed", "success", ""))
-	sctx.Config.CI.RequiredReviews = []string{"coderabbit"}
-	sctx.Config.CITimeout = time.Minute
-	url := "https://github.com/test/repo/pull/42"
-	sctx.Run.PRURL = &url
-	now := time.Now()
-	poll := 0
-	step := (&steps.CIStep{}).SetBaseBranchTip(func(context.Context) (string, bool) { return base, true }).SetNow(func() time.Time { return now }).SetWaitForNextPoll(func(context.Context, time.Duration) error {
-		run, err := sctx.DB.GetRun(sctx.Run.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if (run.CIReadyAt != nil) != (poll == 0) {
-			t.Fatalf("poll %d readiness=%v", poll, run.CIReadyAt)
-		}
-		poll++
-		if poll == 1 {
-			next := strings.Repeat("b", 40)
-			sctx.Env = append(sctx.Env, "FAKE_CLI_PR_HEAD_SHA="+next, "FAKE_CLI_EXTERNAL_REVIEWS="+externalReviewPayload(next, "missing", "", ""))
-		} else {
-			now = now.Add(2 * time.Minute)
-		}
-		return nil
-	})
-	outcome, err := step.Execute(sctx)
-	if err != nil || outcome == nil || !outcome.NeedsApproval || outcome.AutoFixable || !strings.Contains(outcome.Findings, "MISSING (CI TIMEOUT)") {
-		t.Fatalf("outcome=%+v err=%v", outcome, err)
+	for _, moved := range []bool{false, true} {
+		t.Run(fmt.Sprintf("moved=%t", moved), func(t *testing.T) {
+			t.Parallel()
+			dir, base, head := stepstest.SetupGitRepo(t)
+			sctx := stepstest.NewTestContextWithDBRecords(t, nil, dir, base, head, config.Commands{})
+			sctx.Env = append(stepstest.FakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`), "FAKE_CLI_PR_HEAD_SHA="+head, "FAKE_CLI_EXTERNAL_REVIEWS="+externalReviewPayload(head, "completed", "success", ""))
+			sctx.Config.CI.RequiredReviews = []string{"coderabbit"}
+			sctx.Config.CITimeout = time.Minute
+			url := "https://github.com/test/repo/pull/42"
+			sctx.Run.PRURL = &url
+			now := time.Now()
+			poll := 0
+			step := (&steps.CIStep{}).SetBaseBranchTip(func(context.Context) (string, bool) { return base, true }).SetNow(func() time.Time { return now }).SetWaitForNextPoll(func(context.Context, time.Duration) error {
+				run, err := sctx.DB.GetRun(sctx.Run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if (run.CIReadyAt != nil) != (poll == 0) {
+					t.Fatalf("poll %d readiness=%v", poll, run.CIReadyAt)
+				}
+				poll++
+				if poll == 1 {
+					next := head
+					if moved {
+						next = strings.Repeat("b", 40)
+					}
+					sctx.Env = append(sctx.Env, "FAKE_CLI_PR_HEAD_SHA="+next, "FAKE_CLI_EXTERNAL_REVIEWS="+externalReviewPayload(next, "missing", "", ""))
+				} else {
+					now = now.Add(2 * time.Minute)
+				}
+				return nil
+			})
+			outcome, err := step.Execute(sctx)
+			if err != nil || outcome == nil || !outcome.NeedsApproval || outcome.AutoFixable {
+				t.Fatalf("outcome=%+v err=%v", outcome, err)
+			}
+			if missing := strings.Contains(outcome.Findings, "MISSING (CI TIMEOUT)"); missing == moved {
+				t.Fatalf("review verdict was not bound to the requested head: moved=%t outcome=%+v", moved, outcome)
+			}
+		})
 	}
 }
 
