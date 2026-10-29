@@ -136,7 +136,7 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	if outcome := pipeline.ProtectedPathOutcome(err); outcome != nil {
 		return ciTerminalRepairOutcome(outcome, targets.Findings, sctx.DeferredFindings), nil
 	}
-	if outcome := s.ciFixAgentBudgetOutcome(sctx, issueDesc, err); outcome != nil {
+	if outcome := s.ciFixAgentBudgetOutcome(sctx, pr, issueDesc, err); outcome != nil {
 		return ciTerminalRepairOutcome(outcome, targets.Findings, sctx.DeferredFindings), nil
 	}
 	if err != nil && pluginContractBroken(err) {
@@ -666,7 +666,7 @@ func ciSelectedFindingsPrompt(findings Findings) string {
 	return section + prefix + string(raw) + suffix
 }
 
-func (s *CIStep) ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, issueDesc string, err error) *pipeline.StepOutcome {
+func (s *CIStep) ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, pr *scm.PR, issueDesc string, err error) *pipeline.StepOutcome {
 	if err == nil || !errors.Is(err, pipeline.ErrAgentTimeout) {
 		return nil
 	}
@@ -677,7 +677,12 @@ func (s *CIStep) ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, issueDesc s
 	case rebaseInProgress(sctx.Ctx, sctx.WorkDir) || mergeInProgress(sctx.Ctx, sctx.WorkDir):
 		leftover = append(leftover, fmt.Sprintf("The timed-out agent left an unfinished rebase or merge in the run worktree at %s; its partial HEAD is not recorded.", sctx.WorkDir))
 	case headErr == nil && head != "" && head != sctx.Run.HeadSHA:
-		if _, recErr := s.recordLocalRepair(sctx, head); recErr != nil {
+		normalized, recErr := ciRetainedRepairHead(sctx, pr)
+		if recErr == nil {
+			head = normalized
+			_, recErr = s.recordLocalRepair(sctx, head)
+		}
+		if recErr != nil {
 			sctx.Log(fmt.Sprintf("warning: could not record timed-out CI repair head %s: %v", head, recErr))
 			leftover = append(leftover, fmt.Sprintf("The timed-out agent left a committed head at %s in the run worktree.", shortObjectID(head)))
 		} else {
@@ -765,19 +770,7 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, produc
 
 func (s *CIStep) commitRepairOnBase(sctx *pipeline.StepContext, summary string, producer *agent.Result, base string) (ciRepairResult, error) {
 	render := func() (string, error) {
-		repairSummary := summary
-		if repairSummary == "" {
-			repairSummary = "repair failing checks"
-		}
-		message, err := sctx.Config.Commit.RenderFixMessageForBranch(types.StepCI, repairSummary, sctx.Run.Branch)
-		if err != nil {
-			return "", fmt.Errorf("render CI repair commit message: %w", err)
-		}
-		message, err = withCommitTrailers(sctx, message, producer)
-		if err != nil {
-			return "", fmt.Errorf("render CI repair commit trailers: %w", err)
-		}
-		return message, nil
+		return renderFixCommitMessage(sctx, types.StepCI, summary, "repair failing checks", producer)
 	}
 	if err := conformAgentCommitsOnBase(sctx, types.StepCI, base, render); err != nil {
 		return ciRepairResult{}, err
@@ -828,6 +821,20 @@ func (s *CIStep) commitRepairOnBase(sctx *pipeline.StepContext, summary string, 
 	}
 
 	return s.recordRepair(sctx, headSHA)
+}
+
+func ciRetainedRepairHead(sctx *pipeline.StepContext, pr *scm.PR) (string, error) {
+	baseBranch := effectivePRBaseBranch(sctx)
+	if pr != nil && strings.TrimSpace(pr.BaseBranch) != "" {
+		baseBranch = strings.TrimSpace(pr.BaseBranch)
+	}
+	render := func() (string, error) {
+		return renderFixCommitMessage(sctx, types.StepCI, "", "repair failing checks", nil)
+	}
+	if err := conformAgentCommitsOnBase(sctx, types.StepCI, "refs/remotes/origin/"+baseBranch, render); err != nil {
+		return "", err
+	}
+	return stepGitHeadSHA(sctx)
 }
 
 // ciHeadAwaitsRecording reports whether a fix round that committed nothing

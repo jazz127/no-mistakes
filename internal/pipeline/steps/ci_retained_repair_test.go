@@ -29,6 +29,9 @@ func TestCIResumedRepairRecoversUnpublishedWork(t *testing.T) {
 		for _, state := range []string{"committed-crash", "recorded-timeout", "merged-crash"} {
 			t.Run(fmt.Sprintf("%s/revalidate=%t", state, revalidate), func(t *testing.T) {
 				f := newCIRepairFixture(t, revalidate, nil)
+				if state == "recorded-timeout" {
+					f.sctx.Config.Commit.FixMessage = "retained({{.Step}}): {{.Summary}}"
+				}
 				mergeBase := ""
 				if state == "merged-crash" {
 					f.sctx.Config.Rebase.Strategy = config.RebaseStrategyMerge
@@ -53,7 +56,7 @@ func TestCIResumedRepairRecoversUnpublishedWork(t *testing.T) {
 						if mergeBase == "" {
 							writeCIFix(f.dir)
 							gitCmd(t, f.dir, "add", "-A")
-							gitCmd(t, f.dir, "commit", "-m", "retained repair")
+							gitCmd(t, f.dir, "commit", "-m", "retained repair\n\n"+agentAttribution)
 						}
 						if state == "recorded-timeout" {
 							return nil, pipeline.ErrAgentTimeout
@@ -76,6 +79,13 @@ func TestCIResumedRepairRecoversUnpublishedWork(t *testing.T) {
 				if state == "recorded-timeout" {
 					if first == nil || !first.NeedsApproval || f.sctx.Run.HeadSHA != f.localHead(t) {
 						t.Fatalf("timeout did not retain its head at a gate: %+v", first)
+					}
+					if got := fullMessage(t, f.dir, "HEAD"); got != "retained(ci): repair failing checks" {
+						t.Fatalf("timeout recorded an unnormalized commit message: %q", got)
+					}
+					run, err := f.sctx.DB.GetRun(f.sctx.Run.ID)
+					if err != nil || run == nil || run.HeadSHA != f.localHead(t) || run.LastPushedSHA == nil || *run.LastPushedSHA != f.headSHA {
+						t.Fatalf("timeout custody binding = (%+v, %v)", run, err)
 					}
 				} else if first != nil {
 					t.Fatalf("crash outcome = %+v, want monitoring", first)

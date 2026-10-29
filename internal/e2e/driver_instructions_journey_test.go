@@ -74,6 +74,7 @@ func driverInstructionsScenario(t *testing.T) string {
         - name: fixture
           result: pass
           live: true
+          surface: product
           evidence: fixture
           reason: ""
       verdict: go

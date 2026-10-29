@@ -472,9 +472,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			return nil, err
 		}
 		if pending {
-			head, err := stepGitHeadSHA(sctx)
+			head, err := ciRetainedRepairHead(sctx, pr)
 			if err != nil {
-				return nil, fmt.Errorf("resolve head after failed CI fix: %w", err)
+				return nil, fmt.Errorf("normalize retained head after failed CI fix: %w", err)
 			}
 			repair, err := s.recordRepair(sctx, head)
 			if err != nil {

@@ -659,11 +659,13 @@ func TestCIStep_CarryReviewOnReplay_PendingCarryMergeResolverGetsOnlyIndependent
 func TestCIStep_CarryReviewOnReplay_AFailedFixerCommitOnTopRevalidatesFromReview(t *testing.T) {
 	t.Parallel()
 	f := newReplayFixture(t, true, false)
-	f.carry(t)
+	carried := f.carry(t)
+	f.sctx.Config.Commit.FixMessage = "retained({{.Step}}): {{.Summary}}"
 	f.sctx.Agent = &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		writeCIFix(opts.CWD)
 		gitCmd(t, opts.CWD, "add", "-A")
-		gitCmd(t, opts.CWD, "commit", "-m", "partial fix")
+		gitCmd(t, opts.CWD, "commit", "-m", "partial fix\n\n"+agentAttribution)
+		writeFile(t, opts.CWD, "leftover.txt", "uncommitted repair\n")
 		return nil, errors.New("fixer crashed after committing")
 	}}
 	f.sctx.Fixing = true
@@ -694,6 +696,15 @@ func TestCIStep_CarryReviewOnReplay_AFailedFixerCommitOnTopRevalidatesFromReview
 	committed := f.localHead(t)
 	if f.sctx.Run.HeadSHA != committed {
 		t.Fatalf("run head = %s, want the fixer's commit %s recorded", f.sctx.Run.HeadSHA, committed)
+	}
+	if got := fullMessage(t, f.dir, "HEAD"); got != "retained(ci): repair failing checks" {
+		t.Fatalf("failed fixer commit bypassed commit settings: %q", got)
+	}
+	if gitCmd(t, f.dir, "rev-parse", "HEAD~1") != carried || gitCmd(t, f.dir, "show", "HEAD:ci-fix.txt") != "fixed" {
+		t.Fatal("normalization changed the retained repair or its carried parent")
+	}
+	if got := gitStatusPorcelain(t, f.dir); got != "?? leftover.txt" {
+		t.Fatalf("normalization committed or changed dirty leftovers: %q", got)
 	}
 	if got := f.approval(t); got != "" {
 		t.Fatalf("approval = %q, want it revoked", got)
