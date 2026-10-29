@@ -40,7 +40,10 @@ type reviewBotCheck struct {
 // that turns each issue into a finding carrying its action.
 type ciIssues struct {
 	provider scm.Provider
-	checks   []scm.Check
+	// requiredReviews is the trusted ci.required_reviews list; it alone
+	// enables an opt-in review bot.
+	requiredReviews []string
+	checks          []scm.Check
 	// failing is the sorted list of fail-bucket check names. It may carry a
 	// name more than once when same-named checks fail together.
 	failing []string
@@ -76,7 +79,7 @@ type ciIssues struct {
 //   - a merge conflict is an auto-fix error integrated under rebase.strategy;
 //   - a green PR behind a base that requires up-to-date branches takes the
 //     same integration repair;
-//   - a failing check published by a registered review bot (scm.ReviewBots)
+//   - a failing check published by a recognized review bot (scm.ReviewBotsFor)
 //     is the bot's opinion about the change, not a verdict on it, so it
 //     becomes one ask-user warning per unresolved bot comment, anchored to
 //     the file and line the comment is about; under
@@ -94,9 +97,22 @@ type ciIssues struct {
 func ciObservationFindings(issues ciIssues) Findings {
 	var items []Finding
 	codeChecks := 0
+	externalReviews := 0
 	var botChecks []reviewBotCheck
+	bots := scm.ReviewBotsFor(issues.requiredReviews)
 	for _, check := range selectedFailingChecks(issues.checks, issues.failing) {
-		if bot, ok := scm.ReviewBotForApp(check.App); ok {
+		bot, known := scm.ReviewBotForCheck(bots, check)
+		if check.ExternalReview != "" && !known {
+			externalReviews++
+			items = append(items, Finding{
+				Severity: types.FindingSeverityWarning, Action: types.ActionAskUser,
+				Category: types.FindingCategoryCIReviewBot,
+				Check:    check.Name, CheckID: check.ProviderID,
+				Description: fmt.Sprintf("Required external review %s is %s at the current PR head; completion is not proven. Strict completion gating is supported only for documented reviewer profiles on supported forges.", check.ExternalReview, check.State),
+			})
+			continue
+		}
+		if known {
 			botChecks = append(botChecks, reviewBotCheck{check: check, bot: bot})
 			continue
 		}
@@ -111,7 +127,7 @@ func ciObservationFindings(issues ciIssues) Findings {
 		})
 	}
 	if issues.greenBots {
-		botChecks = append(botChecks, greenReviewBotChecks(issues.checks)...)
+		botChecks = append(botChecks, greenReviewBotChecks(bots, issues.checks)...)
 	}
 	items = append(items, reviewBotFindings(issues.provider, botChecks, issues.botComments)...)
 	if issues.mergeConflict {
@@ -134,6 +150,9 @@ func ciObservationFindings(issues ciIssues) Findings {
 	items = append(items, transient...)
 
 	var parts []string
+	if externalReviews > 0 {
+		parts = append(parts, fmt.Sprintf("%d required external reviews incomplete", externalReviews))
+	}
 	switch codeChecks {
 	case 0:
 	case 1:
@@ -226,7 +245,7 @@ func reviewBotFindings(provider scm.Provider, checks []reviewBotCheck, comments 
 		hasComments := false
 		for _, comment := range comments {
 			author, ok := scm.ReviewBotForLogin(provider, comment.Author)
-			if !ok || author.AppSlug != checked.bot.AppSlug {
+			if !ok || author.AppSlug != checked.bot.AppSlug || author.AuthorID != 0 && comment.AuthorID != author.AuthorID {
 				continue
 			}
 			hasComments = true
@@ -254,16 +273,23 @@ func reviewBotFindings(provider scm.Provider, checks []reviewBotCheck, comments 
 				Description: fmt.Sprintf("%s: %s", strings.TrimSpace(comment.Author), body),
 			})
 		}
-		if matched || checked.green {
+		incompleteReview := checked.check.ExternalReview != "" && checked.check.State != "UNRESOLVED_FINDINGS"
+		if checked.green || matched && !incompleteReview {
 			continue
 		}
 		description := fmt.Sprintf("Review bot check failing: %s", checked.check.Name)
+		if checked.check.ExternalReview != "" {
+			description = fmt.Sprintf("Required external review %s is %s at the current PR head", checked.check.ExternalReview, checked.check.State)
+		}
 		if link := strings.TrimSpace(checked.check.Link); link != "" {
 			description += " - " + link
 		}
-		if hasComments {
+		switch {
+		case checked.check.ExternalReview != "":
+			description += " - review completion or resolution is still required"
+		case hasComments:
 			description += " - its unresolved comments are represented by another failed check from the same app"
-		} else {
+		default:
 			description += " - no unresolved review comments were found, so decide whether to proceed"
 		}
 		candidates = append(candidates, Finding{
@@ -353,11 +379,11 @@ func reviewBotCommentsAlways(sctx *pipeline.StepContext) bool {
 // on a new head yet can still have unresolved comments from an earlier one. A
 // pending or cancelled bot check is excluded: its review may still be
 // posting, and reading comments before the check completes would race it.
-func greenReviewBotChecks(checks []scm.Check) []reviewBotCheck {
+func greenReviewBotChecks(bots []scm.ReviewBot, checks []scm.Check) []reviewBotCheck {
 	var green []reviewBotCheck
 	present := map[string]bool{}
 	for _, check := range checks {
-		bot, ok := scm.ReviewBotForApp(check.App)
+		bot, ok := scm.ReviewBotForCheck(bots, check)
 		if !ok {
 			continue
 		}
@@ -366,7 +392,7 @@ func greenReviewBotChecks(checks []scm.Check) []reviewBotCheck {
 			green = append(green, reviewBotCheck{check: check, bot: bot, green: true})
 		}
 	}
-	for _, bot := range scm.ReviewBots {
+	for _, bot := range bots {
 		if !present[bot.AppSlug] {
 			green = append(green, reviewBotCheck{bot: bot, green: true})
 		}
@@ -398,9 +424,10 @@ func readReviewBotComments(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 // bot's check finding without its comments rather than failing the
 // observation.
 func reviewBotComments(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, checks []scm.Check) []scm.ReviewComment {
-	wanted := reviewBotCommentsAlways(sctx) && len(greenReviewBotChecks(checks)) > 0
+	bots := scm.ReviewBotsFor(requiredReviews(sctx))
+	wanted := reviewBotCommentsAlways(sctx) && len(greenReviewBotChecks(bots, checks)) > 0
 	for _, check := range checks {
-		if _, ok := scm.ReviewBotForApp(check.App); ok && check.Failing() {
+		if _, ok := scm.ReviewBotForCheck(bots, check); ok && check.Failing() {
 			wanted = true
 			break
 		}
@@ -424,7 +451,7 @@ func reviewBotComments(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, ch
 // returns the read error, because the caller would otherwise report
 // checks-passed over comments it never read.
 func (s *CIStep) greenReviewBotFindings(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, checks []scm.Check) (Findings, error) {
-	if !reviewBotCommentsAlways(sctx) || len(greenReviewBotChecks(checks)) == 0 {
+	if !reviewBotCommentsAlways(sctx) || len(greenReviewBotChecks(scm.ReviewBotsFor(requiredReviews(sctx)), checks)) == 0 {
 		return Findings{}, nil
 	}
 	comments, err := readReviewBotComments(sctx, host, pr)
@@ -432,11 +459,12 @@ func (s *CIStep) greenReviewBotFindings(sctx *pipeline.StepContext, host scm.Hos
 		return Findings{}, err
 	}
 	return ciObservationFindings(ciIssues{
-		provider:    host.Provider(),
-		checks:      checks,
-		reruns:      s.transientReruns.used,
-		botComments: comments,
-		greenBots:   true,
+		provider:        host.Provider(),
+		requiredReviews: requiredReviews(sctx),
+		checks:          checks,
+		reruns:          s.transientReruns.used,
+		botComments:     comments,
+		greenBots:       true,
 	}), nil
 }
 
@@ -484,6 +512,10 @@ func parseCIFixTargets(raw string) (ciFixTargets, error) {
 	if err != nil {
 		return ciFixTargets{}, err
 	}
+	return ciFixTargetsFromFindings(findings), nil
+}
+
+func ciFixTargetsFromFindings(findings Findings) ciFixTargets {
 	targets := ciFixTargets{Findings: findings}
 	seen := map[string]bool{}
 	for _, item := range findings.Items {
@@ -509,7 +541,7 @@ func parseCIFixTargets(raw string) (ciFixTargets, error) {
 		}
 		return targets.Checks[i].Name < targets.Checks[j].Name
 	})
-	return targets, nil
+	return targets
 }
 
 func (t ciFixTargets) empty() bool { return len(t.Findings.Items) == 0 }

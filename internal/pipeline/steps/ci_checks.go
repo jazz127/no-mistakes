@@ -1,7 +1,9 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,8 +13,9 @@ import (
 )
 
 type lastFixedIssues struct {
-	Checks        []scm.CheckTarget `json:"checks,omitempty"`
-	MergeConflict bool              `json:"mergeConflict,omitempty"`
+	Checks          []scm.CheckTarget `json:"checks,omitempty"`
+	MergeConflict   bool              `json:"mergeConflict,omitempty"`
+	ConflictBaseSHA string            `json:"conflictBaseSHA,omitempty"`
 }
 
 // pollInterval returns the polling interval based on elapsed time since CI monitoring started.
@@ -49,12 +52,14 @@ func hasPendingChecks(checks []scm.Check) bool {
 }
 
 // hasExecutingPendingChecks returns true if any CI check is still running or
-// queued on its own. A check the provider holds for maintainer approval is
-// pending but will not finish without a human, so it never defers escalation
-// of the other checks' failures.
+// queued on its own. A check the provider holds for a person - a maintainer
+// approval or a blocking manual job - is pending but will not finish without
+// that person, so it never defers escalation of a failure it is observed
+// alongside. Jobs GitLab left in `created` behind a blocked stage are ordinary
+// pending checks, so a failure there still waits for them, exactly as before.
 func hasExecutingPendingChecks(checks []scm.Check) bool {
 	for _, c := range checks {
-		if c.Pending() && !c.AwaitingApproval {
+		if c.Pending() && !c.HeldForHuman() {
 			return true
 		}
 	}
@@ -64,6 +69,15 @@ func hasExecutingPendingChecks(checks []scm.Check) bool {
 func hasAwaitingApprovalChecks(checks []scm.Check) bool {
 	for _, c := range checks {
 		if c.AwaitingApproval && c.Pending() {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAwaitingManualJobChecks(checks []scm.Check) bool {
+	for _, c := range checks {
+		if c.AwaitingManualJob && c.Pending() {
 			return true
 		}
 	}
@@ -222,11 +236,11 @@ func pendingCheckMatchesLastFixed(checks []scm.Check, lastFixedChecks string) bo
 	return false
 }
 
-func encodeLastFixedChecks(checks []scm.CheckTarget, mergeConflict bool) string {
+func encodeLastFixedChecks(checks []scm.CheckTarget, mergeConflict bool, conflictBaseSHA string) string {
 	if len(checks) == 0 && !mergeConflict {
 		return ""
 	}
-	encoded, err := json.Marshal(lastFixedIssues{Checks: checks, MergeConflict: mergeConflict})
+	encoded, err := json.Marshal(lastFixedIssues{Checks: checks, MergeConflict: mergeConflict, ConflictBaseSHA: conflictBaseSHA})
 	if err != nil {
 		return ""
 	}
@@ -256,13 +270,18 @@ func decodeLastFixedChecks(raw string) (lastFixedIssues, bool) {
 // one whose targets are all still red as they were. A target that cleared, or
 // a conflict that resolved, is the provider acting on the repair and makes
 // the observation fresh.
-func (s *CIStep) lastRepairStillUnverified(checks []scm.Check, mergeConflict bool) bool {
+func (s *CIStep) lastRepairStillUnverified(checks []scm.Check, mergeConflict bool, conflictBaseSHA string) bool {
 	issues, ok := decodeLastFixedChecks(s.lastFixedChecks)
 	if !ok {
 		return false
 	}
-	if issues.MergeConflict && !mergeConflict {
-		return false
+	if issues.MergeConflict {
+		if !mergeConflict {
+			return false
+		}
+		if issues.ConflictBaseSHA != "" && conflictBaseSHA != "" && issues.ConflictBaseSHA != conflictBaseSHA {
+			return false
+		}
 	}
 	for _, target := range issues.Checks {
 		if !checkTargetFailedTerminally(checks, target) {
@@ -270,6 +289,19 @@ func (s *CIStep) lastRepairStillUnverified(checks []scm.Check, mergeConflict boo
 		}
 	}
 	return true
+}
+
+// checkTargetStillFailing reports whether a check matching target is in the
+// fail bucket. Unlike checkTargetFailedTerminally it does not accept a
+// cancelled check: the pre-repair refresh must only hand the fixer a failure
+// the provider still reports, never a cancellation of a re-run.
+func checkTargetStillFailing(checks []scm.Check, target scm.CheckTarget) bool {
+	for _, check := range checks {
+		if checkMatchesTarget(check, target) && check.Failing() {
+			return true
+		}
+	}
+	return false
 }
 
 func checkTargetFailedTerminally(checks []scm.Check, target scm.CheckTarget) bool {
@@ -441,4 +473,16 @@ func ciMonitoringTimeoutOutcome() *pipeline.StepOutcome {
 		NeedsApproval: true,
 		Findings:      string(findingsJSON),
 	}
+}
+
+func getCIChecks(ctx context.Context, host scm.Host, pr *scm.PR) ([]scm.Check, string, bool, error) {
+	requestedHead := pr.HeadSHA
+	pr.ObservedHeadSHA = ""
+	checks, err := host.GetChecks(ctx, pr)
+	observedHead := pr.ObservedHeadSHA
+	moved := errors.Is(err, scm.ErrHeadChanged) || observedHead != "" && observedHead != requestedHead
+	if moved && err != nil && !pluginContractBroken(err) {
+		err = fmt.Errorf("%w: %v", scm.ErrHeadChanged, err)
+	}
+	return checks, observedHead, moved, err
 }

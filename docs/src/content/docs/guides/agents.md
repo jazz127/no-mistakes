@@ -22,7 +22,7 @@ Pipeline agent prompts also include a workspace-boundary preamble and an executi
 It tells agents to keep intentional source, project, user-data, and system file writes inside the disposable worktree, use that exact path prefix when tools require absolute paths without guessing or re-resolving paths, avoid mutating system state such as Homebrew packages, `/Applications`, or global tool config, and treat that boundary as prompt steering rather than true enforcement.
 The only intentional out-of-worktree write it allows is test evidence under the run's managed evidence directory when a testing prompt asks for it.
 Incidental temp or cache writes from normal development tools are still allowed.
-The same preamble bounds the read side: agents may read outside the worktree and run read-only commands, but must not run filesystem-wide searches such as `find /` or `mdfind /`, and must not hunt the host filesystem for an installed tool. When a needed tool is not on `PATH` and no repository-local path is supplied, agents report the missing tool and blocked work in their normal result rather than searching the machine; the [Test step](/no-mistakes/reference/pipeline-steps/#test) has its own live-scenario guidance.
+The same preamble bounds the read side: agents may read outside the worktree and run read-only commands, but must not run filesystem-wide searches such as `find /` or `mdfind /`, and must not hunt the host filesystem for an installed tool. When a needed tool is not on `PATH` and no repository-local path is supplied, agents report the missing tool and blocked work in their normal result rather than searching the machine. That rule stops the search and any verification that needs the tool; an agent still does the rest of its task, including edits. The [Test step](/no-mistakes/reference/pipeline-steps/#test) has its own live-scenario guidance.
 Testing prompts also ask agents to remove transient working-tree artifacts they created, such as downloaded models, caches, build outputs, large binaries, or generated data directories, before reporting completion.
 
 ## How to choose quickly
@@ -150,7 +150,7 @@ Re-run `no-mistakes init` after an upgrade to refresh that skill, including over
 Older versions vendored the skill into each initialized repo's `.claude/skills` and `.agents/skills`; those copies are no longer needed, and `init` prints a notice when it finds one so you can remove it.
 The skill drives `no-mistakes axi`, a non-interactive command surface that prints TOON to stdout and progress to stderr.
 When CI is ready - either its registered checks are green or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no registered checks - and known mergeability is clear, `axi run` and `axi respond` return `outcome: checks-passed` with a help line pointing at the PR instead of waiting for a human merge. An empty check result without that declaration is not ready; see the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for the readiness rules.
-That is a successful agent stopping point: report that the PR is ready and ask the user to review and merge it.
+That is a successful agent stopping point: report that the PR is ready and ask the user to review and merge it, or run [`no-mistakes axi handoff`](/no-mistakes/reference/cli/#no-mistakes-axi-handoff) to end green monitoring without cancelling the run. Handoff requires an actively monitored open PR with persisted readiness and records `handed_off`; it does not merge or close the PR. The open/green check is a snapshot at the monitor evaluation.
 By default the run stays active there and keeps monitoring the PR, so the agent runs no command and must never hand-rebase.
 Successful outcomes also instruct the agent to summarize the run for the user.
 When the pipeline applied fixes, successful outcomes include a `fixes` table listing each fix so the agent can acknowledge what it missed and the user can review them.
@@ -159,7 +159,7 @@ Under [`ci.release_after_checks_pass`](/no-mistakes/reference/repo-config/#cirel
 When that monitor sees an actual conflict it rebases onto the base, resolves it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push, so no agent or user action is needed.
 On GitHub, a clean PR whose base requires branches to be up to date (`mergeStateStatus: BEHIND`) still reports `checks-passed` and waits for a human to bring it up to date; only when the repository opts into [`ci.rebase_behind`](/no-mistakes/reference/repo-config/#cirebase_behind) does the monitor give it the same rebase, once its checks are green and the base has held still for one poll.
 A PR that is merely behind a base without that rule needs nothing either, since the platform merges it.
-The one exception is when that monitor is no longer running - the PR was closed, the run was aborted or superseded, it idle-timed-out, or its auto-fix attempts were exhausted - in which case see [`no-mistakes rerun`](/no-mistakes/reference/cli/#no-mistakes-rerun) for the restart conditions.
+The one exception is when that monitor is no longer running - the PR was closed, the run was aborted, superseded, or explicitly handed off, it idle-timed-out, or its auto-fix attempts were exhausted - in which case see [`no-mistakes rerun`](/no-mistakes/reference/cli/#no-mistakes-rerun) for the restart conditions.
 A run that failed before Push only because an agent invocation failed - a provider error, a usage limit, or the agent process exiting - can instead continue from its failed step with [`no-mistakes axi retry --run <id>`](/no-mistakes/reference/cli/#no-mistakes-axi-retry); it refuses with the failed proof whenever continuing is not provably safe.
 The agent must not use `no-mistakes axi run` to refresh a still-active PR: after `checks-passed` it reattaches to the running monitor with HEAD unchanged and returns the monitor output without rebasing.
 
@@ -178,6 +178,7 @@ no-mistakes axi sync --adopt-published
 no-mistakes axi respond --action approve
 no-mistakes axi respond --run <id> --action approve
 no-mistakes axi logs --step review --full
+no-mistakes axi handoff
 no-mistakes axi abort
 no-mistakes axi abort --run <id>
 no-mistakes axi retry --run <id>
@@ -245,7 +246,7 @@ After no-mistakes starts one, it terminates any remaining child processes when t
 Step logs record their process lifecycle, including start and exit lines with the PID, and AXI status exposes that PID while the subprocess is still active.
 Persistent server agents (Rovo Dev and OpenCode) use their managed server lifecycle instead.
 
-Transient API and network failures, stochastic prose turn endings, transient tool-call or permission validation errors, and final-text parse failures whose remedy is a fresh turn (provider protocol residue after a complete object, or a split answer the parser could not fuse) are retried up to three times with exponential backoff. Provider quota and free-usage-limit errors stop retries within that agent, even when a backend marks them retryable; see [quota-aware routing](/no-mistakes/reference/global-config/#quota_routing) for switching agents. A retry never extends the invocation's deadline: when the time left is shorter than the failed attempt took, the retry is skipped and the step fails with the original error. Retry messages are recorded as lifecycle activity for native subprocess agents, falling back to the streaming text path for direct callers that do not supply `OnLifecycle`.
+Transient API and network failures, stochastic prose turn endings, transient tool-call or permission validation errors, and final-text parse failures whose remedy is a fresh turn (provider protocol residue after a complete object, or a split answer the parser could not fuse) are retried up to three times with exponential backoff. Network failures include DNS errors such as `EAI_AGAIN`, connection failures, and request timeouts. Claude applies this policy to fresh and resumed invocations, including terminal API errors without an HTTP status; a reported non-transient HTTP status still fails immediately, even if the diagnostic quotes a network error. Provider quota and free-usage-limit errors stop retries within that agent, even when a backend marks them retryable; see [quota-aware routing](/no-mistakes/reference/global-config/#quota_routing) for switching agents. A retry never extends the invocation's deadline: when the time left is shorter than the failed attempt took, the retry is skipped and the step fails with the original error. Retry messages are recorded as lifecycle activity for native subprocess agents, falling back to the streaming text path for direct callers that do not supply `OnLifecycle`.
 
 ## Intent extraction
 
@@ -269,7 +270,7 @@ Use `intent.disabled_readers` to disable specific transcript sources, or set `in
 
 ## Claude
 
-Spawns a `claude` subprocess for each invocation with `--output-format stream-json`. The print-mode user prompt is sent as text on stdin rather than placed in the process arguments. By default it also adds `--dangerously-skip-permissions`, unless you already set your own Claude permission flag through `agent_args_override`. Reads JSONL events from stdout. Supports native structured output via `--json-schema`.
+Spawns a `claude` subprocess for each invocation with `--output-format stream-json`. The print-mode user prompt is sent as text on stdin rather than placed in the process arguments. By default it also adds `--dangerously-skip-permissions`, unless you already set your own Claude permission flag through `agent_args_override`. Reads JSONL events from stdout. Supports native structured output via `--json-schema`. A nonzero exit with empty stderr reports the plain-text stdout tail, the result subtype, or `no stderr or stdout output` instead of a blank message. A nonzero exit after a successful result event that carries the requested output uses that result, except when the step requires completed children.
 For review-fixer reuse, Claude starts a stream-json session and resumes it with `claude -p --resume <id>`.
 
 ## Codex

@@ -252,6 +252,7 @@ git remote -v | grep no-mistakes
 
 If it's missing, run `no-mistakes init` again.
 Re-running init refreshes an existing gate and repairs the `no-mistakes` remote when it is missing.
+If init instead refuses because the remote already exists with another URL, it leaves that remote alone; when the `.git` is shared with another no-mistakes home, follow the `url.<base>.insteadOf` rewrite the refusal prints (see [`no-mistakes init`](/no-mistakes/reference/cli/#no-mistakes-init)).
 It also reattaches an existing gate after you rename or move the repo directory, as long as the old path no longer exists.
 
 ### Check the receive hooks
@@ -304,13 +305,13 @@ Check the [Provider Integration](/no-mistakes/guides/provider-integration/) requ
 
 Symptom: CI step keeps monitoring an open PR longer than expected, or pauses after the idle timeout.
 
-By default, the run keeps monitoring the pull request after CI readiness is established, and ends when the PR is merged or closed. Ending it at readiness instead requires [`ci.release_after_checks_pass`](/no-mistakes/reference/repo-config/#cirelease_after_checks_pass). If the run has not finished, consult the [CI readiness rules](/no-mistakes/reference/pipeline-steps/#ci), including unresolved mergeability and checks missing from the PR rollup.
+By default, the run keeps monitoring the pull request after CI readiness is established, and ends when the PR is merged or closed, or when you explicitly hand it to human reviewers with [`no-mistakes axi handoff`](/no-mistakes/reference/cli/#no-mistakes-axi-handoff); handoff ends monitoring without cancelling, merging, or closing the PR. Ending it at readiness instead requires [`ci.release_after_checks_pass`](/no-mistakes/reference/repo-config/#cirelease_after_checks_pass). If the run has not finished, consult the [CI readiness rules](/no-mistakes/reference/pipeline-steps/#ci), including unresolved mergeability and checks missing from the PR rollup.
 
 How long the monitor runs is controlled by `ci_timeout` in `~/.no-mistakes/config.yaml`, an idle timeout that re-arms whenever the upstream default branch advances; the [`ci_timeout` field reference](/no-mistakes/reference/global-config/#ci_timeout) owns the default, the `unlimited` keyword and its aliases, and the exact re-arm semantics.
 Older config files may still contain an explicit `ci_timeout: "4h"` value; update it if you want the newer default behavior.
 
 If the PR is still open at the timeout, the step pauses for approval with findings for the open monitoring state or any known unresolved failures.
-You can approve, fix, or skip from the TUI or `no-mistakes axi respond`.
+You can approve, fix, skip, or abort from the TUI or `no-mistakes axi respond`.
 
 A park that happens **before** the timeout, with a finding that CI checks could not be read from the provider, means the check read itself is failing (after 6 consecutive failed polls, the step stops waiting instead of spinning to `ci_timeout`). The finding is provider-neutral and the step log shows the underlying provider error; for GitHub, a `gh` older than 2.50 rejects the `gh pr checks --json` call and needs upgrading. The same park on GitLab, Forgejo, Bitbucket Cloud, Azure DevOps, Gitea, or a provider plugin points at that provider's CLI, credentials, or plugin instead. For GitLab's "waiting for the delivered commit's own checks" message, see [CI source-commit binding](/no-mistakes/reference/pipeline-steps/#ci).
 Use `no-mistakes axi abort` only when you mean to cancel the whole active run.

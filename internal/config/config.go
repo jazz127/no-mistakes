@@ -69,7 +69,7 @@ const (
 	// Global-config-only; a pushed branch cannot change it.
 	DefaultGateReconcileTimeout = 30 * time.Second
 	// CITimeoutUnlimited is the sentinel meaning "monitor until the PR is
-	// merged, closed, or the run is aborted - never self-terminate".
+	// merged, closed, handed off, or aborted - never self-terminate".
 	// Any non-positive ci_timeout, or the keywords "unlimited", "none",
 	// "off", and "never", resolves to this.
 	CITimeoutUnlimited = time.Duration(-1)
@@ -224,11 +224,17 @@ type GlobalConfig struct {
 	// survives on this machine. Global-only for the same reason as Eval: it
 	// describes local disk retention, never a repository policy, so no
 	// pushed branch may set it.
-	Worktree                  Worktree      `yaml:"-"`
-	CITimeout                 time.Duration `yaml:"-"`
-	StepQuietWarning          time.Duration `yaml:"-"`
-	AgentTimeout              time.Duration `yaml:"-"`
-	AgentCrashRetries         int           `yaml:"-"`
+	Worktree          Worktree      `yaml:"-"`
+	CITimeout         time.Duration `yaml:"-"`
+	StepQuietWarning  time.Duration `yaml:"-"`
+	AgentTimeout      time.Duration `yaml:"-"`
+	AgentCrashRetries int           `yaml:"-"`
+	// MaxConcurrentRuns caps how many pipeline runs may execute at once on
+	// this machine. A newly submitted run past the cap waits in the pending
+	// queue in submission order until a running run finishes, fails, or is
+	// cancelled. Zero (the default) means unlimited. Global-only: it admits
+	// this machine's daemon-wide execution, so no pushed branch may set it.
+	MaxConcurrentRuns         int           `yaml:"-"`
 	AgentTimeoutsConfigured   bool          `yaml:"-"`
 	ReviewAgentTimeout        time.Duration `yaml:"-"`
 	TestAgentTimeout          time.Duration `yaml:"-"`
@@ -267,6 +273,7 @@ type GlobalConfig struct {
 	// value still wins over it.
 	Rebase RebaseRaw
 	Commit GlobalCommitRaw
+	PR     GlobalPRRaw
 	Intent GlobalIntentRaw
 	Test   TestRaw
 	// Review carries the operator's own review guidance for every gated
@@ -306,6 +313,7 @@ type globalConfigRaw struct {
 	StepQuietWarning          string                     `yaml:"step_quiet_warning"`
 	AgentTimeout              string                     `yaml:"agent_timeout"`
 	AgentCrashRetries         int                        `yaml:"agent_crash_retries"`
+	MaxConcurrentRuns         int                        `yaml:"max_concurrent_runs"`
 	ReviewAgentTimeout        string                     `yaml:"review_agent_timeout"`
 	TestAgentTimeout          string                     `yaml:"test_agent_timeout"`
 	AgentWorkingTimeout       string                     `yaml:"agent_working_timeout"`
@@ -317,6 +325,7 @@ type globalConfigRaw struct {
 	CI                        CIRaw                      `yaml:"ci"`
 	Rebase                    RebaseRaw                  `yaml:"rebase"`
 	Commit                    GlobalCommitRaw            `yaml:"commit"`
+	PR                        GlobalPRRaw                `yaml:"pr"`
 	Intent                    GlobalIntentRaw            `yaml:"intent"`
 	Test                      TestRaw                    `yaml:"test"`
 	Review                    OperatorReviewRaw          `yaml:"review"`
@@ -336,28 +345,52 @@ type globalConfigRaw struct {
 	Providers           ProvidersRaw                 `yaml:"providers"`
 }
 
-// ForgeProfile selects one isolated provider CLI configuration directory.
+// ForgeProfile selects one isolated provider CLI configuration directory, or
+// one GitHub login already signed in to a gh configuration.
 // ExpectedLogin optionally pins the account the profile must be signed in as;
-// resolution fails closed when the profile's active login differs. It carries
-// an account name only, never credentials.
+// resolution fails closed when the profile's active login differs. GHUser
+// selects an account signed in to the ambient gh configuration by name; its
+// token is read once per run and never stored. Both carry an account name only, never credentials.
 type ForgeProfile struct {
 	GHConfigDir   string `yaml:"gh_config_dir"`
 	GLabConfigDir string `yaml:"glab_config_dir"`
 	ExpectedLogin string `yaml:"expected_login"`
+	GHUser        string `yaml:"gh_user"`
 }
 
-// ForgeProfiles maps a remote host token to its machine-local provider profile.
+// IsGitHub reports whether the profile routes through the gh CLI.
+func (p ForgeProfile) IsGitHub() bool {
+	return p.GHConfigDir != "" || p.GHUser != ""
+}
+
+// ForgeProfiles maps a remote host token, optionally scoped to one repository
+// owner as "host/owner", to its machine-local provider profile.
 type ForgeProfiles map[string]ForgeProfile
 
+// SplitForgeProfileKey splits a forge_profiles key into its host token and
+// optional repository owner. A plain host key returns an empty owner.
+func SplitForgeProfileKey(key string) (host, owner string) {
+	host, owner, _ = strings.Cut(key, "/")
+	return host, owner
+}
+
 // RepositoryOverride contains machine-local settings for one normalized remote.
-// Review and Document are additive guidance only: they are rendered alongside
-// the repository's trusted rules and can never replace or remove them.
+// Review, Document, and Test are additive guidance only: they are rendered
+// alongside the repository's trusted rules and can never replace or remove them.
 type RepositoryOverride struct {
 	Commit   GlobalCommitRaw            `yaml:"commit"`
 	PR       RepositoryPRRaw            `yaml:"pr"`
 	Commands map[string]CommandOverride `yaml:"commands"`
 	Review   OperatorReviewRaw          `yaml:"review"`
 	Document DocumentRaw                `yaml:"document"`
+	Test     RepositoryTestRaw          `yaml:"test"`
+}
+
+// RepositoryTestRaw is the test block a repository_overrides entry may set:
+// only the additive live-validation runbook, never a setting that steers
+// evidence publication or the gate.
+type RepositoryTestRaw struct {
+	Instructions string `yaml:"instructions"`
 }
 
 // OperatorReviewRaw is the review block the operator's global config may set,
@@ -367,11 +400,20 @@ type OperatorReviewRaw struct {
 	PathInstructions []PathInstruction `yaml:"path_instructions"`
 }
 
+// GlobalPRRaw contains machine-wide PR presentation defaults.
+// Template and PublishIntent are deliberately not machine-wide settings.
+type GlobalPRRaw struct {
+	Appendix string `yaml:"appendix"`
+}
+
 // RepositoryPRRaw contains machine-local per-repository PR defaults.
 type RepositoryPRRaw struct {
 	TitleFormat *string `yaml:"title_format"`
 	Template    string  `yaml:"template"`
 	Appendix    string  `yaml:"appendix"`
+	// UpdateText is keep or regenerate. Only a matching repository_overrides
+	// entry can set it. Empty means regenerate.
+	UpdateText string `yaml:"update_text"`
 }
 
 // RepositoryOverrides maps remote URLs to machine-local per-repository settings.
@@ -383,6 +425,9 @@ type RepoConfig struct {
 	Agents         []types.AgentName `yaml:"-"`
 	Commands       Commands          `yaml:"commands"`
 	IgnorePatterns []string          `yaml:"ignore_patterns"`
+	// TrustedIgnorePatterns preserves the default branch's authorized exclusions
+	// when review instructions override exclusions from the pushed branch.
+	TrustedIgnorePatterns []string `yaml:"-"`
 	// ProtectedPaths prevents automatic staging of dirty matching paths. It is
 	// trusted-only, regardless of allow_repo_commands, so a pushed branch cannot
 	// remove the maintainer's protection from its own fixes.
@@ -494,6 +539,14 @@ type ReviewRaw struct {
 	// at least one changed file; a run that touches nothing matching leaves
 	// the review prompt exactly as it is without this setting.
 	PathInstructions []PathInstruction `yaml:"path_instructions"`
+	// AgentTimeout is an optional per-repository Review invocation stall
+	// budget, a Go duration such as "10m". It can only tighten the global
+	// review_agent_timeout: a longer value is ignored, so a repository cannot
+	// weaken the machine's policy. Like the rest of this block it is honored
+	// ONLY from the trusted default-branch copy, because the pushed branch is
+	// the thing the timeout gates and must not be able to loosen, or choose,
+	// the budget of its own review.
+	AgentTimeout string `yaml:"agent_timeout"`
 }
 
 // PRRaw is the YAML representation of pull-request settings.
@@ -503,9 +556,9 @@ type PRRaw struct {
 	// repository explicitly opts into pushed-branch settings with
 	// allow_repo_commands.
 	BaseBranch string `yaml:"base_branch"`
-	// Template, PublishIntent, and Appendix are repository-only publication
-	// policy. All three remain trusted-only even when allow_repo_commands is
-	// enabled. Appendix empty means full.
+	// Template, PublishIntent, and Appendix remain trusted-only even when
+	// allow_repo_commands is enabled. An empty Appendix inherits machine-local
+	// defaults, falling back to full.
 	Template      string `yaml:"template"`
 	PublishIntent *bool  `yaml:"publish_intent"`
 	Appendix      string `yaml:"appendix"`
@@ -706,6 +759,8 @@ type AutoFixRaw struct {
 // CIRaw is the YAML representation of CI-step settings.
 // Pointer fields distinguish "not set" (nil) from "set to 0" (disabled).
 type CIRaw struct {
+	RequiredReviews []string `yaml:"required_reviews"`
+
 	RerunTransient *int `yaml:"rerun_transient"`
 	// RevalidateRepairs is a pointer so an explicit `false` in a repository's
 	// config can override a global `true`, which a plain bool could not
@@ -724,6 +779,9 @@ type CIRaw struct {
 
 // CI holds the resolved CI-step settings.
 type CI struct {
+	// RequiredReviews names external reviewers whose completion gates readiness.
+	RequiredReviews []string
+
 	// RerunTransient is how many times the CI step may re-run a single check
 	// the provider reported as cancelled - the one terminal outcome it
 	// attributes to itself rather than to the job - before that check reaches
@@ -758,7 +816,7 @@ type CI struct {
 	// it is opt-in (see VISION.md).
 	RevalidateRepairs bool
 	// ReviewBotComments selects when the CI step reads a registered review
-	// bot's (scm.ReviewBots) unresolved review comments.
+	// bot's (scm.ReviewBotsFor) unresolved review comments.
 	//
 	// "on_failure" (default): only when the bot's check failed, so a green
 	// bot check never blocks checks-passed.
@@ -794,13 +852,13 @@ type CI struct {
 	CarryReviewOnReplay bool
 
 	// ReleaseAfterChecksPass makes the CI step finish the run at its checks
-	// verdict instead of monitoring the pull request until it is merged or
-	// closed.
+	// verdict instead of monitoring the pull request until it is merged, closed,
+	// declined, or explicitly handed off.
 	//
 	// false (default): the step records readiness and keeps polling, which is
 	// the behavior every run has had until now - a later base-branch advance or
 	// conflict is repaired and the merge itself is observed, bounded by
-	// ci_timeout.
+	// ci_timeout, unless an operator explicitly hands off the green monitor.
 	//
 	// true: the green observation ends the step, and the run completes with the
 	// checks_passed status, releasing its worktree and its lane while the merge
@@ -892,6 +950,13 @@ type Config struct {
 	Worktree                  Worktree
 	Commands                  Commands
 	CommandOverrides          map[string]CommandOverride
+	// ReviewAgentTimeoutTightened is set when the trusted repository's
+	// review.agent_timeout cut the Review budget below the global one. It is
+	// kept apart from AgentTimeoutsConfigured because that flag is read for
+	// every step: a repository that only shortens Review must not change the
+	// crash-retry eligibility of Document, Lint, or Test, whose budgets it did
+	// not touch. Read it through AgentTimeoutConfiguredFor.
+	ReviewAgentTimeoutTightened bool
 	// Gates are the repository's extra checks, already trusted-only by the
 	// time they reach here (EffectiveRepoConfig sourced them from the trusted
 	// default-branch copy).
@@ -922,6 +987,8 @@ type Config struct {
 	NoCI bool
 	// Providers holds the resolved provider-specific settings.
 	Providers Providers
+	// TrustedIgnorePatterns is the default branch's authorized review exclusions.
+	TrustedIgnorePatterns []string
 }
 
 // ProvidersRaw is the YAML representation of provider-specific settings,
@@ -1068,7 +1135,10 @@ type PR struct {
 	// Nil preserves the historical default: publish the extracted intent.
 	PublishIntent *bool
 	// Appendix is full, collapsed, or minimal. Empty preserves full.
-	Appendix    string
+	Appendix string
+	// UpdateText is keep or regenerate. Empty means regenerate. It is set only
+	// from a matching repository_overrides entry.
+	UpdateText  string
 	TitleFormat string
 }
 
@@ -1215,11 +1285,13 @@ type TestRaw struct {
 // Pointer fields distinguish "not set" (nil) from explicit zero/false values.
 type EvidenceRaw struct {
 	StoreInRepo *bool `yaml:"store_in_repo"`
+	// Compact controls PR testing-section presentation only; pushed-readable.
+	Compact *bool `yaml:"compact"`
 	// AttachMedia uploads image and video evidence to GitHub user-attachments
 	// when the PR body is rendered. It defaults on so default-config PRs stop
-	// citing local disk paths for screenshots; set false to opt out. The
-	// orphan-branch store (store_in_repo) is independent: when both are on,
-	// the PR body carries both the commit-pinned link and the attachment.
+	// citing local disk paths for screenshots; set false to opt out even when
+	// store_in_repo is true. The orphan-branch store is independent: when both
+	// are on, the PR body carries both the commit-pinned link and the attachment.
 	// Like store_in_repo, this is pushed-readable.
 	AttachMedia *bool   `yaml:"attach_media"`
 	Dir         *string `yaml:"dir"`
@@ -1256,6 +1328,10 @@ type Test struct {
 	Evidence                Evidence
 	Instructions            string
 	AllowApproveOverFailure string
+	// RepositoryInstructions come from the repository_overrides entry matching
+	// the repository's remote and are rendered before, never instead of,
+	// Instructions.
+	RepositoryInstructions string
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -1267,6 +1343,8 @@ type Test struct {
 // GitHub user-attachments at PR render time so remote reviewers can open them
 // without an evidence branch. Text artifacts stay inlined or locally cited.
 type Evidence struct {
+	// Compact defaults true; false opts into inline PR evidence previews.
+	Compact     bool
 	StoreInRepo bool
 	AttachMedia bool
 	Dir         string
@@ -1548,7 +1626,8 @@ forgejo_axi_path: forgejo-axi
 # watch it keeps afterwards. Each base-branch advance re-arms this timer.
 # Set to "unlimited", "none", "off", "never", or any non-positive duration
 # to disable the timeout. By default the monitor keeps watching after checks
-# are green; ci.release_after_checks_pass ends the run at readiness.
+# are green; ci.release_after_checks_pass ends the run at readiness, and
+# no-mistakes axi handoff ends it explicitly for human review.
 # See docs/src/content/docs/reference/global-config.md#ci_timeout.
 ci_timeout: "168h"
 
@@ -1566,6 +1645,11 @@ agent_timeout: "30m"
 # Additional attempts for an agent-crashed validation step (0-3, opt-in).
 # Requires unchanged head, base, config, clean worktree and evidence.
 agent_crash_retries: 0
+
+# Optional cap on how many pipeline runs execute at once on this machine.
+# Past the cap, newly submitted runs wait in submission order (pending)
+# until a running run finishes, fails, or is cancelled. 0 means unlimited.
+# max_concurrent_runs: 1
 
 # Optional cap for a turn that is still producing output or waiting on a live
 # child. Unset means no extension past agent_timeout. Must be at least
@@ -1732,6 +1816,8 @@ auto_fix:
 # default branch overrides this value.
 ci:
   rerun_transient: 0
+  # Optional external review completion gate; repository reference owns support.
+  required_reviews: []
   # Whether EVERY CI repair must re-pass the whole pipeline before it is
   # published, or only the ones whose continuity with the reviewed head cannot
   # be proven. Defaults to false: a repair that descends from the reviewed head
@@ -1771,15 +1857,15 @@ ci:
   carry_review_on_replay: false
 
   # Whether the CI step finishes the run as soon as every check is green
-  # instead of monitoring the pull request until it is merged or closed.
-  # Defaults to false, which is what the step has always done: the run stays
-  # open, keeps watching the PR, and can still auto-rebase it if the base branch
-  # later conflicts. Set true to record the checks-passed verdict and release
-  # the run there (outcome: checks-passed, run status: checks_passed), so the
-  # run's worktree and lane are not held for a human merge decision - the
-  # recorded CI duration then measures CI only. CI readiness is still recorded
-  # either way; a repository that sets ci.release_after_checks_pass on its own
-  # default branch overrides this value.
+  # instead of monitoring the pull request until it is merged, closed, or
+  # explicitly handed off. Defaults to false, which is what the step has
+  # always done: the run stays open, keeps watching the PR, and can still
+  # auto-rebase it if the base branch later conflicts. Set true to record the
+  # checks-passed verdict and release the run there (outcome: checks-passed,
+  # run status: checks_passed), so the run's worktree and lane are not held for
+  # a human merge decision - the recorded CI duration then measures CI only.
+  # CI readiness is still recorded either way; a repository that sets
+  # ci.release_after_checks_pass on its own default branch overrides this value.
   release_after_checks_pass: false
 
 # Auto-fix commit subject template. Available variables: {{.Step}}, {{.Summary}}, and {{.Branch}}.
@@ -1817,12 +1903,15 @@ intent:
 # gathers to demonstrate the change works). By default they are kept on local
 # disk under <NM_HOME>/evidence. attach_media (default true) uploads image and
 # video artifacts to GitHub user-attachments when the PR is rendered so remote
-# reviewers can open them; text artifacts stay inlined. Opt in to
-# store_in_repo to also publish the full directory to an orphan evidence branch
-# in the same repository and link it from the PR body. The evidence branch
-# shares no history with your code branches, so artifacts never enter the
-# pushed branch or the default branch. When both are on, the PR body carries
-# both the attachment and the commit-pinned link.
+# reviewers can open them; text artifacts stay inlined. Uploads need the raw
+# GitHub token from "gh auth token", read once per PR render; if your gh sits
+# behind a credential vault that prompts before it releases the token, set
+# attach_media to false so the PR step never asks, even with store_in_repo on.
+# Opt in to store_in_repo to also publish the full directory to an orphan
+# evidence branch in the same repository and link it from the PR body. The
+# evidence branch shares no history with your code branches, so artifacts never
+# enter the pushed branch or the default branch. When both are on, the PR body
+# carries both the attachment and the commit-pinned link.
 #
 # no-mistakes reaps its own evidence rather than leaving that to an OS temp
 # directory timer: retention ages run directories out (default 14 days) and
@@ -2721,6 +2810,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if !repoOnly.AutoFix.Gates.IsZero() {
 		return nil, fmt.Errorf("auto_fix.gates is repository-only; configure it on the trusted default branch")
 	}
+	if err := validatePRAppendix(raw.PR.Appendix); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
 	if err := validateGlobalCommitRaw(raw.Commit); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
@@ -2731,6 +2823,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 	if err := validateWorktreeRaw(raw.Worktree); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	if err := validateRequiredReviews(raw.CI.RequiredReviews); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 	if err := validateRebaseRaw(raw.Rebase); err != nil {
@@ -2805,6 +2900,10 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		return nil, fmt.Errorf("agent_crash_retries must be between 0 and 3")
 	}
 	cfg.AgentCrashRetries = raw.AgentCrashRetries
+	if raw.MaxConcurrentRuns < 0 {
+		return nil, fmt.Errorf("max_concurrent_runs must be 0 or greater (0 means unlimited)")
+	}
+	cfg.MaxConcurrentRuns = raw.MaxConcurrentRuns
 	configuredTimeout := false
 	if raw.AgentTimeout != "" {
 		d, err := parsePositiveDuration("agent_timeout", raw.AgentTimeout)
@@ -2934,6 +3033,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.CI = raw.CI
 	cfg.Rebase = raw.Rebase
 	cfg.Commit = raw.Commit
+	cfg.PR = raw.PR
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
 	cfg.Providers = raw.Providers
@@ -2953,21 +3053,45 @@ func normalizeForgeProfiles(raw ForgeProfiles) (ForgeProfiles, error) {
 		if _, exists := profiles[host]; exists {
 			return nil, fmt.Errorf("invalid forge_profiles: duplicate host %q after case normalization", host)
 		}
+		hostToken, owner := SplitForgeProfileKey(host)
+		if hostToken == "" {
+			return nil, fmt.Errorf("invalid forge_profiles.%s: host must not be empty", host)
+		}
+		if strings.Contains(host, "/") && (owner == "" || strings.ContainsAny(owner, "/ \t")) {
+			return nil, fmt.Errorf("invalid forge_profiles.%s: an owner-scoped key must be host/owner with a single owner segment", host)
+		}
 		ghDir := strings.TrimSpace(profile.GHConfigDir)
 		glabDir := strings.TrimSpace(profile.GLabConfigDir)
-		if (ghDir == "") == (glabDir == "") {
+		profile.GHUser = strings.TrimSpace(profile.GHUser)
+		profile.ExpectedLogin = strings.TrimSpace(profile.ExpectedLogin)
+		if profile.GHUser != "" {
+			if glabDir != "" {
+				return nil, fmt.Errorf("invalid forge_profiles.%s: gh_user selects a GitHub account and cannot be combined with glab_config_dir", host)
+			}
+			if ghDir != "" {
+				return nil, fmt.Errorf("invalid forge_profiles.%s: gh_user selects a login in the ambient gh configuration and cannot be combined with gh_config_dir", host)
+			}
+			if profile.ExpectedLogin != "" {
+				return nil, fmt.Errorf("invalid forge_profiles.%s: gh_user already selects the login; remove expected_login", host)
+			}
+			if !validGitHubLogin(profile.GHUser) {
+				return nil, fmt.Errorf("invalid forge_profiles.%s.gh_user: %q is not a GitHub login", host, profile.GHUser)
+			}
+		} else if (ghDir == "") == (glabDir == "") {
 			return nil, fmt.Errorf("invalid forge_profiles.%s: exactly one of gh_config_dir or glab_config_dir is required", host)
+		}
+		if owner != "" && profile.GHUser == "" {
+			return nil, fmt.Errorf("invalid forge_profiles.%s: owner-scoped keys are supported only for gh_user profiles", host)
 		}
 		profile.GHConfigDir = ghDir
 		profile.GLabConfigDir = glabDir
-		profile.ExpectedLogin = strings.TrimSpace(profile.ExpectedLogin)
 		if ghDir != "" {
 			normalized, err := normalizeForgeProfilePath(ghDir)
 			if err != nil {
 				return nil, fmt.Errorf("invalid forge_profiles.%s.gh_config_dir: %w", host, err)
 			}
 			profile.GHConfigDir = normalized
-		} else {
+		} else if glabDir != "" {
 			normalized, err := normalizeForgeProfilePath(glabDir)
 			if err != nil {
 				return nil, fmt.Errorf("invalid forge_profiles.%s.glab_config_dir: %w", host, err)
@@ -2977,6 +3101,21 @@ func normalizeForgeProfiles(raw ForgeProfiles) (ForgeProfiles, error) {
 		profiles[host] = profile
 	}
 	return profiles, nil
+}
+
+// validGitHubLogin accepts the characters GitHub and GitHub Enterprise logins
+// use (managed-user logins add "_"). It refuses a leading "-" so the value can
+// never read as a flag when it is handed to gh.
+func validGitHubLogin(login string) bool {
+	if login == "" || strings.HasPrefix(login, "-") {
+		return false
+	}
+	for _, r := range login {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeForgeProfilePath(value string) (string, error) {
@@ -3104,6 +3243,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if err := validateGateFixLimits(cfg.AutoFix.Gates, cfg.Gates); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
+	if err := validateRequiredReviews(cfg.CI.RequiredReviews); err != nil {
+		return nil, fmt.Errorf("parse repo config: %w", err)
+	}
 	if err := validateRebaseRaw(cfg.Rebase); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
@@ -3160,10 +3302,30 @@ func validatePRRaw(pr PRRaw) error {
 // invalid block has to fail here, before it merges, rather than brick the
 // repository's pipeline afterwards. Do not scope this to the trusted copy.
 func validateReviewRaw(review ReviewRaw) error {
+	if review.AgentTimeout != "" {
+		if _, err := parsePositiveDuration("review.agent_timeout", review.AgentTimeout); err != nil {
+			return err
+		}
+	}
 	if err := validatePathInstructionEntries(review.PathInstructions); err != nil {
 		return err
 	}
 	return validatePathInstructionsBudget([]PathInstructionSource{{Heading: ReviewPathInstructionsHeading, Entries: review.PathInstructions}})
+}
+
+// trustedReviewAgentTimeout returns the repository's review.agent_timeout, or 0
+// when it is unset. LoadRepoFromBytes already rejected an unparsable or
+// non-positive value, so a hand-built RepoConfig carrying one is treated as
+// unset: the global budget then stands, which can never loosen the policy.
+func trustedReviewAgentTimeout(review ReviewRaw) time.Duration {
+	if review.AgentTimeout == "" {
+		return 0
+	}
+	d, err := parsePositiveDuration("review.agent_timeout", review.AgentTimeout)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 func validatePathInstructionEntries(entries []PathInstruction) error {
@@ -3286,7 +3448,9 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		pushed = &RepoConfig{}
 	}
 	effective := *pushed
+	effective.TrustedIgnorePatterns = nil
 	if trusted != nil {
+		effective.TrustedIgnorePatterns = append([]string(nil), trusted.IgnorePatterns...)
 		effective.Document = trusted.Document
 		effective.ProtectedPaths = append([]string(nil), trusted.ProtectedPaths...)
 		// review.path_instructions steers the gate agent that reviews the pushed
@@ -3475,6 +3639,7 @@ func testDefaults() Test {
 	return Test{
 		Evidence: Evidence{
 			StoreInRepo: false,
+			Compact:     true,
 			AttachMedia: true,
 			Dir:         ".no-mistakes/evidence",
 			Branch:      evidence.DefaultBranch,
@@ -3493,6 +3658,9 @@ func testDefaults() Test {
 // The local-storage half is applied separately by applyEvidenceStorageOverrides
 // so a repository config can never reach it (see EvidenceRaw.LocalRoot).
 func applyTestOverrides(dst *Test, src *TestRaw) {
+	if src.Evidence.Compact != nil {
+		dst.Evidence.Compact = *src.Evidence.Compact
+	}
 	if src.Evidence.StoreInRepo != nil {
 		dst.Evidence.StoreInRepo = *src.Evidence.StoreInRepo
 	}
@@ -3799,6 +3967,10 @@ func validateRebaseRaw(r RebaseRaw) error {
 // inverting the bound, and anything above MaxCIRerunTransient is capped so a
 // typo cannot keep a run polling one commit indefinitely.
 func applyCIOverrides(dst *CI, src *CIRaw) {
+	if src.RequiredReviews != nil {
+		dst.RequiredReviews = append([]string{}, src.RequiredReviews...)
+	}
+
 	if src.RerunTransient != nil {
 		dst.RerunTransient = min(max(*src.RerunTransient, 0), MaxCIRerunTransient)
 	}
@@ -3881,6 +4053,14 @@ func (c *Config) AutoFixLimit(step types.StepName) int {
 	}
 }
 
+// AgentTimeoutConfiguredFor reports whether a timeout the operator configured
+// governs step, which makes a budget cut on it deliberate rather than a crash
+// worth a crash retry. The global timeouts apply to every step; a repository's
+// tightened review.agent_timeout applies to Review only.
+func (c *Config) AgentTimeoutConfiguredFor(step types.StepName) bool {
+	return c.AgentTimeoutsConfigured || (step == types.StepReview && c.ReviewAgentTimeoutTightened)
+}
+
 // Merge combines global and per-repo config. Per-repo agent values, including
 // ordered fallback lists, override global agent values when non-empty. Commands
 // and ignore patterns come from repo config only.
@@ -3937,9 +4117,10 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	// repository's decision (see EvidenceRaw.LocalRoot).
 	applyEvidenceStorageOverrides(&test.Evidence, &global.Test.Evidence)
 	// The runbook describes ONE repository's product, so it is resolved from
-	// the repository only - never from global config, which has no repository
-	// to describe. repo here is the EffectiveRepoConfig result, so this value
-	// is already trusted-only.
+	// the repository only - never from top-level global config, which has no
+	// repository to describe (a matching repository_overrides entry adds its
+	// own as Test.RepositoryInstructions below). repo here is the
+	// EffectiveRepoConfig result, so this value is already trusted-only.
 	test.Prepare = repo.Test.Prepare
 	test.BaseAttribution = repo.Test.BaseAttribution
 	test.Instructions = strings.TrimSpace(repo.Test.Instructions)
@@ -4006,6 +4187,10 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		if pr.Appendix == "" {
 			pr.Appendix = override.PR.Appendix
 		}
+		pr.UpdateText = override.PR.UpdateText
+	}
+	if pr.Appendix == "" {
+		pr.Appendix = global.PR.Appendix
 	}
 	if repo.PR.TitleFormat != nil {
 		pr.TitleFormat = *repo.PR.TitleFormat
@@ -4070,12 +4255,23 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		// trusted-only (EffectiveRepoConfig sourced it from the trusted copy).
 		DisableProjectSettings: repo.DisableProjectSettings,
 		NoCI:                   repo.NoCI,
+		TrustedIgnorePatterns:  append([]string(nil), repo.TrustedIgnorePatterns...),
+	}
+
+	// repo.Review is trusted-only (EffectiveRepoConfig). The repository value
+	// only ever tightens the global budget, and a tightened budget counts as a
+	// configured timeout for crash-retry purposes, like any other configured
+	// one, but only for the Review step whose budget it changed.
+	if repoTimeout := trustedReviewAgentTimeout(repo.Review); repoTimeout > 0 && repoTimeout < cfg.ReviewAgentTimeout {
+		cfg.ReviewAgentTimeout = repoTimeout
+		cfg.ReviewAgentTimeoutTightened = true
 	}
 
 	if override != nil {
 		cfg.CommandOverrides = copyCommandOverrides(override.Commands)
 		cfg.Review.RepositoryPathInstructions = resolvePathInstructions(override.Review.PathInstructions)
 		cfg.Document.RepositoryInstructions = strings.TrimSpace(override.Document.Instructions)
+		cfg.Test.RepositoryInstructions = strings.TrimSpace(override.Test.Instructions)
 	}
 
 	if repo.Agent != "" {

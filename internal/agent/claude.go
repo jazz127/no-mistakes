@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -57,12 +58,20 @@ func (e *claudeAPIError) Error() string {
 	if len(message) > claudeAPIErrorMessageMaxRunes {
 		message = append(message[:claudeAPIErrorMessageMaxRunes], []rune("...")...)
 	}
+	if e.Status == 0 {
+		return "API error: " + string(message)
+	}
 	return fmt.Sprintf("API error status %d: %s", e.Status, string(message))
 }
 
 func (e *claudeAPIError) classify() (string, bool) {
 	if e.usageLimitReached || isTerminalRetryError(strings.ToLower(e.Message)) {
 		return "", false
+	}
+	if e.Status == 0 {
+		// Network failures have no HTTP status; classify their terminal
+		// diagnostic without letting text override a reported HTTP status.
+		return classifyTransient(errors.New(e.Message))
 	}
 	if status := transientStatusRE.FindString(strconv.Itoa(e.Status)); status != "" {
 		return "http " + status, true
@@ -145,20 +154,28 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 
 	var usage TokenUsage
 	var result *claudeResult
-	if err := parseClaudeEvents(ctx, started.stdout, opts.OnChunk, &usage, &result); err != nil {
+	var stdoutTail claudeStdoutTail
+	if err := parseClaudeEvents(ctx, io.TeeReader(started.stdout, &stdoutTail), opts.OnChunk, &usage, &result); err != nil {
 		err = started.waitAfterParseError(err)
-		stderrWG.Wait()
-		retErr := fmt.Errorf("claude parse events: %w", err)
-		emitAgentExited(opts, "claude", pid, retErr)
-		return resultFromUsage(usage), retErr
+		if !started.closedByWaitDelay(err) || !claudeFinishedWithOutput(result, opts.JSONSchema) {
+			stderrWG.Wait()
+			retErr := fmt.Errorf("claude parse events (result received: %t): %w", result != nil, err)
+			emitAgentExited(opts, "claude", pid, retErr)
+			return resultFromUsage(usage), retErr
+		}
 	}
 
-	waitErr := started.wait()
+	waitErr := started.waitKeepingResult(claudeFinishedWithOutput(result, opts.JSONSchema))
 	stderrWG.Wait()
 	if waitErr != nil {
-		retErr := claudeExitError(waitErr, string(stderrBuf), result.terminalAPIError())
-		emitAgentExited(opts, "claude", pid, retErr)
-		return resultFromUsage(usage), retErr
+		if ctx.Err() != nil || opts.RequireCompletedChildren || !claudeFinishedWithOutput(result, opts.JSONSchema) {
+			retErr := claudeExitError(waitErr, string(stderrBuf), result.terminalAPIError(), stdoutTail.evidence(result))
+			emitAgentExited(opts, "claude", pid, retErr)
+			return resultFromUsage(usage), retErr
+		}
+		if opts.OnChunk != nil {
+			opts.OnChunk(fmt.Sprintf("claude exited after completing its result: %v; using the result", waitErr))
+		}
 	}
 
 	if result == nil {
@@ -193,14 +210,100 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 
 func (a *claudeAgent) Close() error { return nil }
 
-func claudeExitError(waitErr error, stderr string, apiErr *claudeAPIError) error {
+func claudeExitError(waitErr error, stderr string, apiErr *claudeAPIError, evidence string) error {
 	if apiErr == nil {
+		if strings.TrimSpace(stderr) == "" {
+			return fmt.Errorf("claude exited: %w: %s", waitErr, evidence)
+		}
 		return fmt.Errorf("claude exited: %w: %s", waitErr, stderr)
 	}
 	if strings.TrimSpace(stderr) == "" {
 		return fmt.Errorf("claude exited: %w: %w", waitErr, apiErr)
 	}
 	return fmt.Errorf("claude exited: %w: %s: %w", waitErr, strings.TrimSpace(stderr), apiErr)
+}
+
+// claudeFinishedWithOutput reports whether the invocation produced a successful
+// result event carrying the output the caller asked for, so a nonzero exit
+// after it loses nothing.
+func claudeFinishedWithOutput(result *claudeResult, schema json.RawMessage) bool {
+	if result == nil || result.IsError || result.Subtype != "success" {
+		return false
+	}
+	if len(schema) > 0 {
+		return result.StructuredOutput != nil
+	}
+	return result.text != ""
+}
+
+const (
+	claudeStdoutTailLines    = 3
+	claudeStdoutTailLineRune = 300
+	claudeNoOutputEvidence   = "no stderr or stdout output"
+)
+
+// claudeStdoutTail keeps the last few non-event lines the CLI wrote to stdout.
+// The usage-limit banner and similar CLI messages arrive there as plain text
+// between stream-json events, and an exit with empty stderr has no other
+// evidence of its cause.
+type claudeStdoutTail struct {
+	partial []byte
+	// skipping drops the rest of a line that outgrew the buffer.
+	skipping bool
+	lines    []string
+}
+
+func (t *claudeStdoutTail) Write(p []byte) (int, error) {
+	for rest := p; len(rest) > 0; {
+		i := bytes.IndexByte(rest, '\n')
+		if i < 0 {
+			if !t.skipping {
+				t.partial = append(t.partial, rest...)
+				// A stream event line can be megabytes long.
+				if len(t.partial) > 4*claudeStdoutTailLineRune {
+					t.partial, t.skipping = t.partial[:4*claudeStdoutTailLineRune], true
+				}
+			}
+			break
+		}
+		if t.skipping {
+			t.add(string(t.partial))
+		} else {
+			t.add(string(t.partial) + string(rest[:i]))
+		}
+		t.partial, t.skipping = nil, false
+		rest = rest[i+1:]
+	}
+	return len(p), nil
+}
+
+func (t *claudeStdoutTail) add(line string) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "{") {
+		return
+	}
+	if r := []rune(line); len(r) > claudeStdoutTailLineRune {
+		line = string(r[:claudeStdoutTailLineRune]) + "..."
+	}
+	t.lines = append(t.lines, line)
+	if len(t.lines) > claudeStdoutTailLines {
+		t.lines = t.lines[1:]
+	}
+}
+
+// evidence describes why an invocation with empty stderr exited nonzero: the
+// plain-text stdout tail, else the result event's own subtype, else an explicit
+// marker.
+func (t *claudeStdoutTail) evidence(result *claudeResult) string {
+	t.add(string(t.partial))
+	t.partial = nil
+	if len(t.lines) > 0 {
+		return "stdout: " + strings.Join(t.lines, " | ")
+	}
+	if result != nil && result.Subtype != "" {
+		return "result subtype=" + result.Subtype
+	}
+	return claudeNoOutputEvidence
 }
 
 // terminalAPIError returns the API error the result event reports, or nil when
@@ -214,8 +317,12 @@ func (r *claudeResult) terminalAPIError() *claudeAPIError {
 	var fields struct {
 		APIErrorStatus int    `json:"api_error_status"`
 		Result         string `json:"result"`
+		TerminalReason string `json:"terminal_reason"`
 	}
-	if err := json.Unmarshal(r.rawEvent, &fields); err != nil || fields.APIErrorStatus == 0 {
+	if err := json.Unmarshal(r.rawEvent, &fields); err != nil {
+		return nil
+	}
+	if fields.APIErrorStatus == 0 && fields.TerminalReason != "api_error" {
 		return nil
 	}
 	return &claudeAPIError{

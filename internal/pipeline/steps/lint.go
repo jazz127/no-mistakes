@@ -107,11 +107,11 @@ Rules:
 - Do not run tests or broader behavioral validation.
 - Focus on lint, format, and static-analysis issues only.
 - Do not report issues you already fixed.
-- The summary must be one concise sentence fragment suitable for a git commit subject.
-- Keep the summary under 10 words.%s`,
+%s%s`,
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
+			fixSummaryRules(sctx, s.Name()),
 			reassessHistory,
 		)
 		if sctx.PreviousFindings != "" {
@@ -178,11 +178,11 @@ Rules:
 - Do not run tests or broader behavioral validation.
 - Re-run the relevant lint or format commands before finishing.
 - Return JSON with a single "summary" field when you are done.
-- The summary must be one concise sentence fragment suitable for a git commit subject.
-- Keep the summary under 10 words.%s`,
+%s%s`,
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
+			fixSummaryRules(sctx, s.Name()),
 			historySection,
 		)
 		if sctx.PreviousFindings != "" {

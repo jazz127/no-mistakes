@@ -486,3 +486,36 @@ func TestPublish_RedactsHomePathsInTextEvidence(t *testing.T) {
 		t.Errorf("local evidence = %q (%v), want it untouched", local, err)
 	}
 }
+
+func TestPublish_RedactsRunWorktreePathsInTextEvidence(t *testing.T) {
+	remote, work := newRepoWithRemote(t)
+	// An NM_HOME outside the home directory, which home redaction never sees.
+	worktrees := filepath.Join(t.TempDir(), "nm-home", "worktrees")
+	runWorktree := filepath.Join(worktrees, "ab12cd34ef56", "run-1")
+	text := "ran " + runWorktree + "/bin/tool\n" +
+		"cd " + runWorktree + "\n" +
+		"saw " + filepath.Join(worktrees, "0f0f0f0f0f0f", "run-0", "out.log") + "\n" +
+		"listed " + worktrees + " and " + filepath.Join(worktrees, "0f0f0f0f0f0f") + "\n" +
+		"kept " + runWorktree + "-old/x\n"
+	source := writeEvidence(t, t.TempDir(), map[string]string{"logs/run.txt": text})
+
+	req := baseRequest(remote, work, source)
+	req.RunWorktree = runWorktree
+	req.WorktreesRoot = worktrees
+	result, err := Publish(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	got := runGit(t, remote, "cat-file", "-p", result.CommitSHA+":.no-mistakes/evidence/fm/add-login/logs/run.txt")
+	want := "ran {run-worktree}/bin/tool\n" +
+		"cd {run-worktree}\n" +
+		"saw " + filepath.Join("{run-worktree}", "out.log") + "\n" +
+		"listed {worktrees} and {worktrees}\n" +
+		"kept {run-worktree}/x"
+	if got != want {
+		t.Errorf("published text = %q, want %q", got, want)
+	}
+	if local, err := os.ReadFile(filepath.Join(source, "logs", "run.txt")); err != nil || string(local) != text {
+		t.Errorf("local evidence = %q (%v), want it untouched", local, err)
+	}
+}

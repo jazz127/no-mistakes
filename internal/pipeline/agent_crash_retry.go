@@ -208,7 +208,7 @@ func (e *Executor) executeWithCrashRetry(step Step, sctx *StepContext, remaining
 		if outcome != nil && (outcome.ExitCode != 0 || outcome.NeedsApproval) {
 			return outcome, err
 		}
-		if !retryableAgentCrash(sctx.Ctx, err, e.config.AgentTimeoutsConfigured) {
+		if !retryableAgentCrash(sctx.Ctx, err, e.config.AgentTimeoutConfiguredFor(step.Name())) {
 			return outcome, err
 		}
 		if proofErr != nil {

@@ -222,8 +222,8 @@ func TestGetChecksUsesLivePRHeadForWorkflowDiscovery(t *testing.T) {
 	if len(checks) != 1 || checks[0].Name != "build" {
 		t.Fatalf("checks = %+v, want live-head build rollup", checks)
 	}
-	if pr.HeadSHA != "live-head" {
-		t.Fatalf("PR HeadSHA = %q, want live-head", pr.HeadSHA)
+	if pr.HeadSHA != "stale-head" || pr.ObservedHeadSHA != "live-head" {
+		t.Fatalf("requested head = %q, observed head = %q", pr.HeadSHA, pr.ObservedHeadSHA)
 	}
 }
 
@@ -391,6 +391,101 @@ func TestGetChecksCollapseOrderingDoesNotLetWorkflowRunUnionResurrectSupersededC
 	}
 	if got := checks[0]; got.Name != "gate" || got.Bucket != scm.CheckBucketPass {
 		t.Fatalf("checks[0] = %+v, want the latest SUCCESS run to win with no resurrected failure", got)
+	}
+}
+
+func TestGetChecksSupersedesJoblessCancelledWorkflowOnlyWithALaterReplacement(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name        string
+		replacement bool
+		withJob     bool
+		conclusion  string
+		workflowID  int64
+		startedAt   string
+		wantCancel  bool
+		wantBucket  scm.CheckBucket
+	}{
+		{name: "later success represented by jobs", replacement: true, withJob: true, conclusion: "success", workflowID: 1001, wantBucket: scm.CheckBucketPass},
+		{name: "later success without jobs", replacement: true, conclusion: "success", workflowID: 1001, wantCancel: true, wantBucket: scm.CheckBucketPass},
+		{name: "later pending run with jobs", replacement: true, withJob: true, workflowID: 1001, wantBucket: scm.CheckBucketPending},
+		{name: "later failed run with jobs", replacement: true, withJob: true, conclusion: "failure", workflowID: 1001, wantBucket: scm.CheckBucketFail},
+		{name: "no replacement", wantCancel: true},
+		{name: "another workflow with the same name", replacement: true, withJob: true, conclusion: "success", workflowID: 1002, wantCancel: true, wantBucket: scm.CheckBucketPass},
+		{name: "unknown workflow", replacement: true, withJob: true, conclusion: "success", wantCancel: true, wantBucket: scm.CheckBucketPass},
+		{name: "older success", replacement: true, withJob: true, conclusion: "success", workflowID: 1001, startedAt: "2026-08-26T08:00:00Z", wantCancel: true, wantBucket: scm.CheckBucketPass},
+		{name: "later pending run without jobs", replacement: true, workflowID: 1001, wantCancel: true, wantBucket: scm.CheckBucketPending},
+		{name: "later failed run without jobs", replacement: true, conclusion: "failure", workflowID: 1001, wantCancel: true, wantBucket: scm.CheckBucketFail},
+		{name: "later cancelled run without jobs", replacement: true, conclusion: "cancelled", workflowID: 1001, wantCancel: true, wantBucket: scm.CheckBucketCancel},
+		{name: "later skipped run without jobs", replacement: true, conclusion: "skipped", workflowID: 1001, wantCancel: true, wantBucket: scm.CheckBucketSkip},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			jobs := `[]`
+			runs := `{"id":101,"workflow_id":1001,"name":"PR Gates","status":"completed","conclusion":"cancelled","run_started_at":"2026-08-26T08:25:50Z"}`
+			count := 1
+			if tc.replacement {
+				count++
+				startedAt := tc.startedAt
+				if startedAt == "" {
+					startedAt = "2026-08-26T08:39:44Z"
+				}
+				status := "completed"
+				if tc.conclusion == "" {
+					status = "in_progress"
+				}
+				replacementName := "PR Gates"
+				if !tc.withJob {
+					replacementName = "PR Gates rerun"
+				}
+				runs += fmt.Sprintf(`,{"id":102,"workflow_id":%d,"name":%q,"status":%q,"conclusion":%q,"run_started_at":%q}`, tc.workflowID, replacementName, status, tc.conclusion, startedAt)
+				if tc.withJob {
+					jobs = fmt.Sprintf(`[{"__typename":"CheckRun","name":"validate","status":%q,"conclusion":%q,"startedAt":%q,"detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}]`, strings.ToUpper(status), strings.ToUpper(tc.conclusion), startedAt)
+				}
+			}
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{
+				"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
+				githubCommitChecksCommand("", "test/repo", "deadbeef"):               {stdout: githubCommitChecksResponse(jobs)},
+				"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
+					stdout: fmt.Sprintf(`[{"total_count":%d,"workflow_runs":[%s]}]`, count, runs),
+				},
+			}), nil, "", "test/repo")
+
+			checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123", HeadSHA: "deadbeef"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cancelled := false
+			replacements := 0
+			for _, check := range checks {
+				if check.ProviderID == "github-workflow-run:101" {
+					cancelled = true
+					if check.Bucket != scm.CheckBucketCancel {
+						t.Fatalf("cancelled workflow changed bucket: %+v", check)
+					}
+				}
+				if (tc.withJob && check.Name == "validate") || (!tc.withJob && check.ProviderID == "github-workflow-run:102") {
+					replacements++
+					if check.Bucket != tc.wantBucket {
+						t.Fatalf("replacement bucket = %q, want %q: %+v", check.Bucket, tc.wantBucket, check)
+					}
+				}
+			}
+			if wantReplacements := map[bool]int{true: 1}[tc.replacement]; replacements != wantReplacements {
+				t.Fatalf("replacement present %d times, want %d; checks = %+v", replacements, wantReplacements, checks)
+			}
+			if cancelled != tc.wantCancel {
+				t.Fatalf("cancelled workflow present = %v, want %v; checks = %+v", cancelled, tc.wantCancel, checks)
+			}
+			wantCount := count
+			if !tc.wantCancel {
+				wantCount--
+			}
+			if len(checks) != wantCount {
+				t.Fatalf("got %d checks, want %d; replacement must stay visible: %+v", len(checks), wantCount, checks)
+			}
+		})
 	}
 }
 

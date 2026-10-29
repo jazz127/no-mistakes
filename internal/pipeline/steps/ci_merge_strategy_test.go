@@ -40,11 +40,13 @@ func TestCIStep_MergeStrategyConflictRepairMergesTheBaseAndFastForwards(t *testi
 	for _, tc := range []struct {
 		name          string
 		failingChecks []string
+		fixerCommits  bool
 		// wantFixerPrompts is how many CI fixer turns run after the merge.
 		wantFixerPrompts int
 	}{
 		{name: "conflict_only", wantFixerPrompts: 0},
 		{name: "conflict_and_failing_check", failingChecks: []string{"test"}, wantFixerPrompts: 1},
+		{name: "conflict_and_committing_fixer", failingChecks: []string{"test"}, wantFixerPrompts: 1, fixerCommits: true},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -66,6 +68,10 @@ func TestCIStep_MergeStrategyConflictRepairMergesTheBaseAndFastForwards(t *testi
 					return &agent.Result{Output: []byte(`{"summary":"kept both sides"}`)}, nil
 				}
 				writeCIFix(opts.CWD)
+				if tc.fixerCommits {
+					gitCmd(t, opts.CWD, "add", "-A")
+					gitCmd(t, opts.CWD, "commit", "-m", "unshaped fixer subject")
+				}
 				return &agent.Result{Output: []byte(`{"summary":"repair the failing check","code_change_needed":true}`)}, nil
 			}}
 			advancedBase := advanceBaseOverFeature(t, f)
@@ -82,6 +88,9 @@ func TestCIStep_MergeStrategyConflictRepairMergesTheBaseAndFastForwards(t *testi
 			repair, err := (&CIStep{}).autoFixCI(f.sctx, host, pr, ciTargetsFor(tc.failingChecks, true))
 			if err != nil {
 				t.Fatalf("merge-strategy conflict repair failed: %v\nlog:\n%s", err, f.log())
+			}
+			if repair.ConflictBaseSHA != advancedBase {
+				t.Fatalf("conflict repair base = %q, want resolved base %s", repair.ConflictBaseSHA, advancedBase)
 			}
 			if !repair.HeadAdvanced {
 				t.Fatalf("the conflict repair was not recorded as a real change\nlog:\n%s", f.log())
@@ -112,6 +121,12 @@ func TestCIStep_MergeStrategyConflictRepairMergesTheBaseAndFastForwards(t *testi
 			parents := strings.Fields(gitCmd(t, f.dir, "rev-list", "--parents", "-n", "1", merge))
 			if len(parents) != 3 || parents[1] != pushedHead || parents[2] != advancedBase {
 				t.Fatalf("merge commit parents = %v, want [%s %s]", parents[1:], pushedHead, advancedBase)
+			}
+
+			if tc.fixerCommits {
+				if got := gitCmd(t, f.dir, "log", "-1", "--format=%s"); got != "no-mistakes(ci): repair the failing check" {
+					t.Fatalf("fixer commit subject = %q, want configured CI subject", got)
+				}
 			}
 
 			// Published, and published as a fast-forward of what was already

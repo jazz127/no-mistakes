@@ -11,11 +11,17 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+var ErrApprovalBlocked = errors.New("approval blocked by required review")
+
 var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 
 // ErrDaemonShutdown is the cancellation cause RunManager.Shutdown gives every
 // active run.
 var ErrDaemonShutdown = errors.New("daemon shutting down")
+
+// ErrHandoff stops an already-green CI monitor without cancelling the work.
+// Only the daemon's validated explicit handoff request supplies this cause.
+var ErrHandoff = errors.New("green PR handed off for human review")
 
 // ErrParkedAtShutdown is returned when a daemon shutdown reached a run that was
 // fully recorded as waiting at an approval gate. The run keeps that record so
@@ -134,6 +140,19 @@ type StepContext struct {
 	// step in the same run (e.g. the combined document+lint pass).
 	Shared             *RunShared
 	CIReadinessChanged func(ready, declaredNoCI bool)
+	// SetCIReadiness is the daemon-owned transition boundary for CI monitor
+	// readiness. When set, the CI step uses it instead of writing readiness
+	// directly, so a daemon can serialize readiness changes with lifecycle
+	// decisions such as handoff. Embeddings leave it nil and use the local DB
+	// write path.
+	SetCIReadiness func(ready, declaredNoCI bool) error
+	// HandoffPending reports an explicit request waiting on this monitor.
+	HandoffPending func() bool
+	// SetPRState is the daemon-owned transition boundary for CI monitor PR
+	// lifecycle observations. Embeddings leave it nil and use the local DB
+	// write path.
+	SetPRState func(state string) error
+	CIWake     <-chan struct{}
 	// MarkRunning tells the executor that a step re-executing as a fix round
 	// has finished its repair and is executing normally again, so the step's
 	// status returns from fixing to running before Execute returns. The CI
@@ -249,27 +268,18 @@ type ApprovalGateResumer interface {
 	ResumeApprovalGate(sctx *StepContext, findingsJSON string) (action types.ApprovalAction, resume bool, err error)
 }
 
-// ApprovalOverrideVerifier is implemented by a step whose approval must not
-// erase the condition that caused its gate (currently: the CI step's live
-// failing checks, and the Test step's persisted failing commands.test result).
-// The executor calls it once, synchronously, when a human answers
-// ActionApprove - never for Skip, Abort, or Fix, which do not claim the step
-// passed. A human's approval always proceeds (this never blocks a deliberate
-// operator decision), but when the verifier returns a reason the executor
-// records the completion as an explicit override (StepResult.OverrideReason,
-// via db.SetStepOverrideReason) instead of making it indistinguishable from a
-// genuinely green completion. CI re-checks its live condition; Test reads the
-// command result persisted when its gate parked rather than re-running it.
+// ApprovalOverrideVerifier preserves unresolved conditions when ActionApprove
+// completes a step. CI reads live checks; Test reads persisted command evidence.
+// The executor calls it when an approve response arrives at a parked gate (live
+// or recovered), not for Skip, Abort, or Fix. An empty reason means no override
+// is needed. A nonempty reason or an ordinary verification error is recorded as
+// an explicit override before approval can complete; failure to persist that
+// evidence fails the run closed.
 //
-// unresolved is a short human-readable reason (e.g. naming the still-failing
-// check or failed configured test command), and "" means the completion needs
-// no override marker. err is reserved for a verification failure distinct
-// from "still unresolved" (e.g.
-// the provider could not be reached); implementations should fail closed by
-// treating err as if it were an unresolved condition described by err, and
-// callers do the same rather than silently completing on error, but the
-// approval itself still proceeds either way - this interface only decides
-// how the completion is recorded, never whether it happens.
+// An error wrapping ErrApprovalBlocked instead refuses the approve response:
+// the gate stays parked and nothing is recorded. CI uses this when a required
+// external review is incomplete or cannot be verified. Steps without this
+// interface are unaffected.
 type ApprovalOverrideVerifier interface {
 	VerifyApprovalOverride(sctx *StepContext) (unresolved string, err error)
 }

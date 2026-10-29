@@ -8,7 +8,7 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor` and `devin`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `ci.rebase_behind`, `ci.carry_review_on_replay`, `ci.release_after_checks_pass`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
+The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `review.agent_timeout`, `gates`, `auto_fix.gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.required_reviews`, `ci.review_bot_comments`, `ci.rebase_behind`, `ci.carry_review_on_replay`, `ci.release_after_checks_pass`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
@@ -63,7 +63,7 @@ disable_project_settings: true
 # Optional PR settings.
 # base_branch is read from the trusted default branch.
 # template, publish_intent, and appendix are trusted publication policy.
-# appendix defaults to full. collapsed and minimal shorten the generated tail.
+# See pr.appendix below for presentation modes and inheritance.
 # title_format is a repository convention and is read from this branch.
 pr:
   base_branch: develop
@@ -88,6 +88,7 @@ ci:
   review_bot_comments: on_failure # or: always
   rebase_behind: false
   carry_review_on_replay: false
+  required_reviews: [] # opt in with: [coderabbit]
 
 # How a base branch that moved under your branch is integrated.
 # Read only from the trusted default branch.
@@ -115,6 +116,7 @@ test:
   evidence:
     store_in_repo: true
     attach_media: true
+    compact: true
     dir: .no-mistakes/evidence
     branch: no-mistakes/evidence
     commit_message: "no-mistakes: evidence for {{.Branch}} (run {{.RunID}})"
@@ -244,7 +246,7 @@ Use a repository Markdown template for the public narrative, followed by no-mist
 pr:
   template: .github/pull_request_template.md
   publish_intent: false # Optional; otherwise original Intent is still published.
-  appendix: collapsed # Optional; full (the default), collapsed, or minimal.
+  appendix: collapsed # Optional; see pr.appendix below.
 ```
 
 For example, commit this template and the configuration to the default branch:
@@ -305,8 +307,8 @@ Choose how much of the generated Risk, Testing, and Pipeline tail is visible aft
 | --- | --- |
 | Type | `string` |
 | Values | `full`, `collapsed`, `minimal` |
-| Default | `full` (missing or empty also preserves the default) |
-| Trust | This value comes from the trusted default branch regardless of `allow_repo_commands`, or from a matching machine-local [`repository_overrides`](/no-mistakes/reference/global-config/#machine-local-pr-publication-defaults) entry when the trusted value is unset |
+| Default | Missing or empty inherits machine-local defaults; see [appendix precedence](/no-mistakes/reference/global-config/#prappendix) |
+| Trust | Trusted default branch only, regardless of `allow_repo_commands`; the pushed branch cannot choose this mode |
 
 `full` is today's body: `## Risk Assessment`, `## Testing`, and `## Pipeline` follow the narrative, in that order.
 
@@ -425,7 +427,7 @@ It augments or clarifies the built-in policy; it cannot disable documentation in
 
 Like `commands.*` and `agent`, this field steers gate behavior, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`: a contributor's pushed branch cannot weaken the documentation rules that gate its own review.
 
-An operator can add their own policy for this repository through a machine-local [`repository_overrides`](/no-mistakes/reference/global-config/#machine-local-review-and-documentation-guidance) entry; it is rendered as a separate, labeled section and never replaces this field.
+An operator can add their own policy for this repository through a machine-local [`repository_overrides`](/no-mistakes/reference/global-config/#machine-local-review-documentation-and-test-guidance) entry; it is rendered as a separate, labeled section and never replaces this field.
 
 ### review.conversation
 
@@ -449,6 +451,27 @@ review:
 **Off (the default)**, the review step is the monologue it has always been: the reviewer is told nothing about a channel, no conversation files are written, no question findings are produced, and the PR body grows no conversation group. A repository that never opted in cannot have a conversation on disk, so for it every review turn also runs session-free and `no-mistakes axi answer` refuses and names this setting. A question asked while the setting was on stays answerable if you turn it off mid-run - see [Turning the setting off does not strand a question already asked](/no-mistakes/concepts/review-conversation/). Upgrading no-mistakes never starts a conversation under a repository that did not ask for one.
 
 The trade-off is latency against precision. A question costs the run a park - tens of minutes to hours of wall clock, waiting on you - and buys a review that decided the point instead of handing you a finding to rule on. Repositories whose changes rarely turn on product intent will not get much for that wait; repositories where the reviewer regularly cannot tell deliberate from accidental will.
+
+### review.agent_timeout
+
+A shorter stall budget for each Review-step agent invocation in this repository, so small, low-risk changes can be bounded more tightly than the machine-wide default.
+
+| | |
+|---|---|
+| Type | `string` (Go duration, positive) |
+| Default | unset (the global [`review_agent_timeout`](/no-mistakes/reference/global-config/#review_agent_timeout) applies) |
+| Trust | Read only from the trusted default branch |
+
+```yaml
+review:
+  agent_timeout: "10m"
+```
+
+**Precedence.** The effective budget is the smaller of this value and the global `review_agent_timeout`. A repository can only tighten the machine policy: a longer value is accepted but has no effect, and the global limit stays in force. An unset key keeps the global limit, so the setting is opt-in.
+
+**Trust boundary.** Commit it to your **default branch**, the same copy the daemon reads `review.conversation` and `review.path_instructions` from. A pushed branch cannot set, change, or remove it, because the timeout gates that branch's own review. A value that is not a positive duration fails the config closed, on the pushed copy too, so an invalid block is caught before it merges.
+
+**What it does not change.** It sets the same per-invocation budget as `review_agent_timeout`: the reviewer, the fixer, and each fresh rereviewer get it independently, and an expiry fails the Review step exactly as before. It never skips Review or counts a timeout as a pass. It does not change [`review_agent_working_timeout`](/no-mistakes/reference/global-config/#review_agent_working_timeout), which stays global and still bounds how long a still-working invocation may continue past the budget. Because a tightened budget is a configured timeout, a Review invocation cut by it is not retried by `agent_crash_retries`, as with a configured global value. Only Review is affected: Document, Lint, and Test keep the crash retry their own, unchanged budgets earn. It is not an aggregate limit on the whole Review step.
 
 ### review.path_instructions
 
@@ -485,9 +508,10 @@ Prose changes only. Do not request test coverage.
 
 `path` uses the same matcher and syntax as [`ignore_patterns`](#ignore_patterns), including the rule that `*` never crosses a `/`, so `**/*.go` covers a single directory level rather than every Go file.
 
-The review step appends only the blocks whose `path` matches at least one changed file, in the order they appear in the file.
+The review step appends blocks in configured order when at least one matched file remains in the review scope defined below.
 Two entries with the same `path` **and** the same `instructions` are injected once. The same instruction text under two different `path` values is injected once per path, because each block states its own scope. Two entries with the same `path` and different `instructions` are both injected.
 Matching runs against the full changed-file list and is deliberately **not** filtered by `ignore_patterns`: that field is read from the pushed branch, so filtering here would let a contributor drop one of your rules from the review of their own branch.
+Paths matched by repository or machine-local rules remain required review coverage even when the pushed branch ignores them, unless the trusted default branch's own `ignore_patterns` also excludes them. A path excluded only by the trusted copy remains reviewable if the pushed copy includes it. Each rendered block lists only its paths in that settled review scope, and a block with no remaining paths is omitted. Review takes the empty-scope shortcut only when neither non-ignored changes nor required instruction-covered paths remain.
 
 Blocks augment the built-in review instructions; they cannot disable them, and a finding the reviewer raises from a block goes through the same severity and action model as any other finding.
 With nothing configured here, or nothing matching the change, this field adds nothing to the review prompt; any [machine-local rules](#machine-local-rules) still apply.
@@ -509,7 +533,7 @@ Like `document.instructions`, this field steers gate behavior, so it is honored 
 
 #### Machine-local rules
 
-The operator gating a repository can add rules from their own global config, globally with [`review.path_instructions`](/no-mistakes/reference/global-config/#reviewpath_instructions) or for this repository with a [`repository_overrides`](/no-mistakes/reference/global-config/#machine-local-review-and-documentation-guidance) entry.
+The operator gating a repository can add rules from their own global config, globally with [`review.path_instructions`](/no-mistakes/reference/global-config/#reviewpath_instructions) or for this repository with a [`repository_overrides`](/no-mistakes/reference/global-config/#machine-local-review-documentation-and-test-guidance) entry.
 Those rules render in their own labeled sections before this field's, never replace it, and count toward the limits above together with it.
 
 ### gates
@@ -612,7 +636,7 @@ Do not rely on a configured command to leave a background server or watcher runn
 
 ### ignore_patterns
 
-Paths to exclude from review and documentation checks.
+Paths to exclude from review and documentation checks. Review also enforces the instruction-covered paths described under [`review.path_instructions`](#reviewpath_instructions).
 
 | | |
 | --- | --- |
@@ -755,6 +779,55 @@ Reruns are skipped when:
 - The check's details link names nothing the provider can re-run, for example a third-party status pointing at an external dashboard, or a link under a workflow run that names no job the API accepts. A link naming one job re-runs that job; a cancelled check naming only the workflow run re-runs the whole workflow, while other run-only links re-run failed jobs; an unrecognized link is widened into neither.
 - The published branch head no longer equals the commit the run delivered. That case terminates with the expected and observed commits instead: re-running checks against a different head would certify a revision this run never produced. See [pipeline steps: CI](/no-mistakes/reference/pipeline-steps/#ci).
 
+### ci.required_reviews
+
+An optional list of external reviewers that must finish before the CI monitor reports `checks-passed`.
+The default is `[]`; the only supported reviewer profile is `coderabbit` on GitHub.com.
+Enable it in the trusted default branch's `.no-mistakes.yaml`:
+
+```yaml
+ci:
+  required_reviews: [coderabbit]
+```
+
+The whole `ci` block is trusted-only, even with `allow_repo_commands: true`.
+A pushed branch cannot disable the requirement or enable it for itself.
+A repository value overrides the operator's global list; an explicit `[]` disables the requirement, while omission inherits the global value.
+Unknown or duplicate reviewer names fail configuration loading.
+
+CodeRabbit must already be installed for the repository by its administrator.
+no-mistakes uses the existing GitHub CLI authentication for read-only observation and adds no CodeRabbit credentials or installation flow.
+When the list is empty, no additional completion checks are made.
+Existing CI and Greptile behavior stays unchanged. CodeRabbit is recognized as a review bot only when this list names `coderabbit`: otherwise an installed CodeRabbit's check is an ordinary CI check and its review-thread comments are never findings, exactly as if no-mistakes had no CodeRabbit support. Once opted in, failed CodeRabbit checks use the same review-bot findings path as Greptile.
+
+Completion requires the latest `CodeRabbit` check run from GitHub.com app ID `347564`, a nonempty immutable check-run ID, `status: completed`, `conclusion: success`, and a `head_sha` matching the exact current PR head.
+The adapter pins the check query to that SHA and verifies the live PR head before and after discovery.
+Names, slugs, formal approvals, and review/comment bodies cannot establish completion.
+Unresolved CodeRabbit review-thread comments from the verified GitHub bot account become bounded `ask-user` findings in the existing review model, even when the required completion check succeeded.
+Every page of review threads and of each unresolved thread's comments is read; a response that cannot prove it is complete (missing comment nodes, an invalid page cursor, or an unreadable later page) leaves the review unverified rather than clean.
+Their bodies are untrusted evidence and cannot instruct the fix agent; the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns that shared handling.
+GitHub's [check runs API](https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference) owns the check fields; CodeRabbit documents its [GitHub check](https://docs.coderabbit.ai/platforms/github-com).
+
+Missing and in-progress reviews keep readiness false and wait under the existing `ci_timeout` policy.
+Skipped, stale, neutral, failed, cancelled, timed-out, unknown terminal outcomes, and rate-limited reviews remain incomplete and produce `ask-user` findings without spending an automatic repair round.
+Unreadable, malformed, partial, or mismatched evidence cannot make the monitor ready.
+`no_ci: true` does not waive an external-review requirement.
+Approval is refused while any required review is incomplete, has unresolved findings, or cannot be verified at the current PR head (including a transient provider or network error). The refusal names the reason and the CI gate stays parked, so the run is not lost; approve again once the review completes, or use fix, skip, or abort. Once required reviews are complete, approval of unrelated CI failures retains the existing explicit-override behavior.
+
+CodeRabbit [documents a passing check titled `Review rate limited`](https://docs.coderabbit.ai/management/rate-limits) when no review ran.
+That name or output title vetoes completion even alongside another successful check at the same head.
+A separately named rate-limit check remains blocking while GitHub still returns it among the latest checks at that head; no-mistakes does not guess from comment text that the limit has cleared.
+The monitor never posts review commands, requests a paid review, or retries a review on the provider's behalf.
+
+Strict gating on GitLab and other forges is unsupported and parks with an explicit unsupported finding when enabled.
+GitLab approvals and discussion activity are not a documented CodeRabbit completion signal.
+GitHub Enterprise Server is also unsupported because its separately installed app has a different immutable identity.
+Leave this setting empty on those platforms to retain normal CI behavior.
+
+This gates no-mistakes readiness, not direct forge merges or merge-queue synthetic commits.
+The merge caller must recheck readiness for the current head and bind its merge request to that SHA.
+Configure forge protection separately if merges outside no-mistakes must be prevented.
+
 ### ci.revalidate_repairs
 
 Whether every CI repair must re-pass the pipeline before it is published, or only the ones whose continuity with the reviewed head cannot be proven.
@@ -811,7 +884,7 @@ With no trusted copy of this file, the operator's global value applies, then the
 
 ### ci.review_bot_comments
 
-When the CI step reads a supported review bot's (currently Greptile's) unresolved review comments.
+When the CI step reads a supported review bot's unresolved review comments. See the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for supported bots and identity verification.
 
 | | |
 |---|---|
@@ -824,18 +897,18 @@ ci:
   review_bot_comments: always
 ```
 
-- **`on_failure` (default)** reads them only when the bot's own check failed. A green bot check is green, whatever comments it left. This is the behavior before the key existed.
+- **`on_failure` (default)** reads them only when the bot's own check failed. A green bot check stays green unless a separate [`ci.required_reviews`](#cirequired_reviews) requirement applies.
 - **`always`** also reads them when the bot's check completed green on the current head, or has not registered on it yet, once the current checks settle. The bot's threads from an earlier head can still be unresolved. Each unresolved comment becomes the same `ask-user` finding a red bot check produces, anchored to the comment's file and line, so an otherwise green head parks for a decision instead of reporting `checks-passed`. A green bot with nothing unresolved is still green.
 
 A review bot can conclude its check `success` while leaving an unresolved comment. The comment most likely to be missed that way is the one on the pipeline's own CI repair commit, which no human has reviewed yet.
 
-Where the comments come from, and how the bot is identified, is provider-specific. On GitHub they are the bot's unresolved review-thread comments, and the bot is identified by the check suite's app slug. On GitLab they are the merge request's unresolved discussion notes, and the bot is identified by the login it comments as (Greptile posts there as `greptileai`); a GitLab job names no publishing application, so no GitLab check can be attributed to a bot.
+The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns provider-specific comment sources, bot identity verification, and prompt-safety handling.
 
 Under `always`:
 
 - Once the current checks settle, comments from green or not-yet-registered bots are included alongside other CI issues, including failed checks. On an otherwise green head, they are read before readiness is reported. A pending or cancelled bot check does not qualify for this additional read. A head with no checks at all under trusted [`no_ci: true`](#no_ci) has them read the same way before it is reported ready. Only unresolved threads count, and the same per-gate bound applies as for a red check. A GitLab note counts only when it is resolvable, unresolved, not a system note, and authored by a registered bot, so an ordinary merge request comment is never a finding.
-- The findings never spend an `auto_fix.ci` attempt. A human decides: approve, skip, or select comments for a fix round.
-- Approving over them records the CI step as passed with an override naming the comments, never as a clean pass.
+- The findings never spend an `auto_fix.ci` attempt. A human can select comments for a fix round or skip; approval is subject to [`ci.required_reviews`](#cirequired_reviews).
+- When approval is allowed, approving over them records the CI step as passed with an override naming the comments, never as a clean pass.
 - On an otherwise green head, a comment list that cannot be read is not treated as empty: `checks-passed` is withheld, and a read that keeps failing parks for a decision. When other CI issues already block readiness, a failed comment read is logged and those issues still reach the gate.
 - Each green poll costs one more provider read for the comments.
 
@@ -917,7 +990,7 @@ A value set here wins over the operator's own [`ci.carry_review_on_replay`](/no-
 
 ### ci.release_after_checks_pass
 
-Whether the CI step finishes the run at its checks verdict instead of monitoring the pull request until it is merged or closed.
+Whether the CI step finishes the run at its checks verdict instead of monitoring the pull request until it is merged, closed, declined, or handed off.
 
 | | |
 |---|---|
@@ -930,7 +1003,7 @@ ci:
   release_after_checks_pass: true
 ```
 
-- **`false` (default)** is what the step has always done: once every check is green the run records readiness and keeps watching the PR until it is merged, closed, or declined, and a later base-branch advance or conflict is still repaired on its own.
+- **`false` (default)** is what the step has always done: once every check is green the run records readiness and keeps watching the PR until it is merged, closed, or declined, unless an operator explicitly hands off the green monitor; a later base-branch advance or conflict is still repaired on its own.
 - **`true`** finishes the step at that point. The run completes with the `checks_passed` status, releases its worktree, and reports `outcome: checks-passed`; whether and when the PR is merged is then the user's decision, and nothing observes the merge afterwards, so the recorded CI duration stops at the checks verdict instead of including the wait for a merge.
 
 This value is read only from the trusted default-branch copy of this file, like the rest of the `ci` block: a pushed branch cannot opt itself into the shorter run, or out of it.
@@ -1021,7 +1094,7 @@ Override the trailers appended to agent-produced commits for this repository.
 The entries follow the [global `commit.trailers` placeholders and validation rules](/no-mistakes/reference/global-config/#committrailers).
 A list here replaces the inherited one rather than extending it, and `trailers: []` turns inherited trailers off for this repository.
 
-This non-executing field is read from the pushed branch without enabling `allow_repo_commands`, like `commit.fix_message`: it shapes only the messages of commits the pipeline makes on that branch.
+This non-executing field is read from the pushed branch without enabling `allow_repo_commands`, like `commit.fix_message`: it shapes the messages of fix commits on that branch, whether the pipeline makes them or rewrites them onto a fix agent's own `git commit` (see [fix commits](/no-mistakes/concepts/auto-fix/#fix-commits)).
 
 ### intent
 
@@ -1085,8 +1158,10 @@ Repository-specific runbook for standing the product up during live validation.
 | Type | `string` (multiline) |
 | Default | Empty |
 
-The Test step injects these instructions into its evidence prompt so the agent can start and drive the real product the way an end user would.
+The Test step injects these instructions into its repair and evidence prompts so each agent can start and drive the real product the way an end user would.
 Like `document.instructions`, this field steers its own gate, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`. A contributor's pushed branch cannot rewrite the runbook that validates that branch.
+
+An operator can add their own runbook for this repository through a machine-local [`repository_overrides`](/no-mistakes/reference/global-config/#machine-local-review-documentation-and-test-guidance) entry; it is rendered as a separate, labeled section before this field's and never replaces it.
 
 ### test.allow_approve_over_failure
 
@@ -1112,16 +1187,20 @@ Fields not set here inherit from global config and then the built-in defaults.
 | --- | --- | --- |
 | `test.evidence.store_in_repo` | `bool` | Inherits from global (default `false`) |
 | `test.evidence.attach_media` | `bool` | Inherits from global (default `true`) |
+| `test.evidence.compact` | `bool` | Inherits from global (default `true`) |
 | `test.evidence.dir` | `string` | Inherits from global (default `.no-mistakes/evidence`) |
 | `test.evidence.branch` | `string` | Inherits from global (default `no-mistakes/evidence`) |
 | `test.evidence.commit_message` | `string` | Inherits from global (default `no-mistakes: evidence for {{.Branch}} (run {{.RunID}})`) |
 
 By default, test evidence is written to `<NM_HOME>/evidence/<run-id>`. Where it is stored locally and how long it is kept are global-only settings; see [`test.evidence`](/no-mistakes/reference/global-config/#testevidence).
-On GitHub.com/GHEC, supported image and video artifacts are uploaded to GitHub user-attachments when the PR is rendered unless `attach_media` is false and `store_in_repo` is also false.
 For GitHub repositories, set `store_in_repo: true` to also publish it to an orphan evidence branch in the code branch's push-target repository and link the artifacts from the PR body; evidence is never committed to the pushed branch, so it never reaches the default branch.
+`compact: false` opts into expanded PR Testing presentation with inline previews while retaining published artifact links. See [global config](/no-mistakes/reference/global-config/#testevidence) for rendering details and publication requirements.
+
+Non-compact Testing sections are taller and can approach GitHub's PR body size limit sooner. Repository weight is unchanged: `store_in_repo` publishes the same artifacts to the evidence branch either way.
+
 `test.evidence.branch` is read ONLY from the trusted default-branch copy of this file, because it names a git ref the daemon pushes to; a pushed branch cannot redirect evidence commits.
 The other publication fields, including `test.evidence.commit_message`, are read from the pushed branch. The commit-message template shapes only the evidence commit subject and cannot select its target branch.
-See [global config](/no-mistakes/reference/global-config/#testevidence) for provider support, limits, validation, and fail-closed behavior.
+See [global config](/no-mistakes/reference/global-config/#testevidence) for attachment behavior, credential-vault opt-out guidance, provider support, limits, validation, and fail-closed behavior.
 
 ### providers.github.draft_pull_requests
 
