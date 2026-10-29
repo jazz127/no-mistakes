@@ -89,7 +89,7 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	}
 	failingTargets := ciFixTargetsFromFindings(failingFindings)
 	if len(failingTargets.Checks) > 0 {
-		expectedHeadSHA, err := stepGitHeadSHA(sctx)
+		expectedHeadSHA, err := ciRepairCheckHead(sctx)
 		if err != nil {
 			return nil, fmt.Errorf("resolve head before snapshotting selected CI checks: %w", err)
 		}
@@ -284,8 +284,12 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 
 	const maxLogBytes = 32 * 1024
 	var logOutput string
-	if host.Capabilities().FailedCheckLogs {
-		logOutput, err = fetchCILogOutput(ctx, host, pr, sctx.Run.Branch, sctx.Run.HeadSHA, targets.Checks, maxLogBytes)
+	if host.Capabilities().FailedCheckLogs && len(targets.Checks) > 0 {
+		checkHeadSHA, err := ciRepairCheckHead(sctx)
+		if err != nil {
+			return ciRepairResult{}, err
+		}
+		logOutput, err = fetchCILogOutput(ctx, host, pr, sctx.Run.Branch, checkHeadSHA, targets.Checks, maxLogBytes)
 		if err != nil {
 			return ciRepairResult{}, err
 		}
@@ -403,6 +407,30 @@ CI logs:
 		repair.Summary = conclusion.Summary
 	}
 	return repair, nil
+}
+
+func ciRepairCheckHead(sctx *pipeline.StepContext) (string, error) {
+	head, err := runOwnedPublishedHead(sctx)
+	if err != nil {
+		return "", err
+	}
+	if head == "" {
+		head = sctx.Run.HeadSHA
+	}
+	localHead, err := stepGitHeadSHA(sctx)
+	if err != nil {
+		return "", err
+	}
+	if localHead != head {
+		publishedHead, err := publishedBranchHead(sctx)
+		if err != nil {
+			return "", err
+		}
+		if publishedHead == localHead {
+			return localHead, nil
+		}
+	}
+	return head, nil
 }
 
 // fetchCILogOutput returns the selected checks' log evidence. A failed
