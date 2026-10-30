@@ -731,6 +731,7 @@ func TestClaudeAgent_RetriesOnlyATerminalTransientAPIError(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		fixture      string
+		banner       string
 		wantAttempts int
 		wantErr      string
 	}{
@@ -750,13 +751,13 @@ func TestClaudeAgent_RetriesOnlyATerminalTransientAPIError(t *testing.T) {
 			name:         "recovered 529 then max turns",
 			fixture:      "claude_recovered_529_max_turns.jsonl",
 			wantAttempts: 1,
-			wantErr:      "claude exited: exit status 1: ",
+			wantErr:      "claude exited: exit status 1: result subtype=error_max_turns",
 		},
 		{
 			name:         "prose quoting 429 then max turns",
 			fixture:      "claude_prose_429_max_turns.jsonl",
 			wantAttempts: 1,
-			wantErr:      "claude exited: exit status 1: ",
+			wantErr:      "claude exited: exit status 1: result subtype=error_max_turns",
 		},
 		{
 			name:         "usage limit",
@@ -773,7 +774,22 @@ func TestClaudeAgent_RetriesOnlyATerminalTransientAPIError(t *testing.T) {
 		{
 			name:         "empty stdout and stderr",
 			wantAttempts: 1,
-			wantErr:      "claude exited: exit status 1: ",
+			wantErr:      "claude exited: exit status 1: no stderr or stdout output",
+		},
+		{
+			name:         "plain-text banner on stdout",
+			banner:       "\n  \nYou've hit your weekly limit \u00b7 resets Jul 9 at 9pm (America/Chicago)\n",
+			wantAttempts: 1,
+			wantErr:      "claude exited: exit status 1: stdout: You've hit your weekly limit \u00b7 resets Jul 9 at 9pm (America/Chicago)",
+		},
+		{
+			// The 2026-09-27 incident shape: the CLI's DNS-failure banner on
+			// stdout, empty stderr, no api_error_status. Transient, so every
+			// bounded attempt runs before the failure surfaces.
+			name:         "EAI_AGAIN banner on stdout",
+			banner:       "API Error: Can't reach the API server — check your internet or DNS (EAI_AGAIN)\n",
+			wantAttempts: claudeMaxRetries + 1,
+			wantErr:      "claude exited: exit status 1: stdout: API Error: Can't reach the API server — check your internet or DNS (EAI_AGAIN)",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -787,6 +803,7 @@ func TestClaudeAgent_RetriesOnlyATerminalTransientAPIError(t *testing.T) {
 			}
 			t.Setenv("NM_CLAUDE_STDIN_HELPER", "replay-then-fail")
 			t.Setenv("NM_CLAUDE_STDIN_FIXTURE", fixture)
+			t.Setenv("NM_CLAUDE_STDIN_BANNER", tc.banner)
 			a := newClaudeStdinHelperAgent(t)
 
 			attempts := 0
@@ -803,6 +820,217 @@ func TestClaudeAgent_RetriesOnlyATerminalTransientAPIError(t *testing.T) {
 			}
 			if err.Error() != tc.wantErr {
 				t.Errorf("error = %q, want %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestClaudeAgent_RetriesEAIAGAINThenSucceeds(t *testing.T) {
+	defer withFastBackoff(t)()
+
+	t.Setenv("NM_CLAUDE_STDIN_HELPER", "transient-then-succeed")
+	t.Setenv("NM_CLAUDE_STDIN_COUNT_FILE", filepath.Join(t.TempDir(), "attempts"))
+	t.Setenv("NM_CLAUDE_STDIN_TRANSIENT_REMAIN", "1")
+	t.Setenv("NM_CLAUDE_STDIN_BANNER", "API Error: Can't reach the API server — check your internet or DNS (EAI_AGAIN)\n")
+	a := newClaudeStdinHelperAgent(t)
+
+	attempts := 0
+	res, err := a.Run(context.Background(), RunOpts{
+		Prompt:    "review",
+		CWD:       t.TempDir(),
+		OnAttempt: func(Attempt) { attempts++ },
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if attempts != 2 {
+		t.Errorf("attempts = %d, want 2 (one transient DNS failure, then success)", attempts)
+	}
+	if res == nil || res.Output == nil {
+		t.Errorf("result = %+v, want the helper's structured output", res)
+	}
+}
+
+func TestClaudeAgent_RetriesTerminalNetworkErrors(t *testing.T) {
+	defer withFastBackoff(t)()
+
+	// Oracle: Claude Code 2.1.301's recorded network failures end with is_error,
+	// terminal_reason=api_error and a null api_error_status. Replaying that
+	// protocol must retry; dropping its result text used to stop at attempt 1.
+	for _, code := range []string{"EAI_AGAIN", "ENOTFOUND", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "Request timed out"} {
+		for _, mode := range []string{"fresh", "resume", "exhausted", "permanent"} {
+			t.Run(code+"/"+mode, func(t *testing.T) {
+				message := "API Error: Can't reach the API server — check your internet or DNS (" + code + ")"
+				if code == "Request timed out" {
+					message = code
+				}
+				status := "null"
+				if mode == "permanent" {
+					status = "400"
+					message = "Invalid request quoting " + code
+				}
+				text, err := json.Marshal(message)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("NM_CLAUDE_STDIN_HELPER", "transient-then-succeed")
+				t.Setenv("NM_CLAUDE_STDIN_COUNT_FILE", filepath.Join(t.TempDir(), "attempts"))
+				t.Setenv("NM_CLAUDE_STDIN_TRANSIENT_REMAIN", "1")
+				t.Setenv("NM_CLAUDE_STDIN_BANNER", `{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","api_error_status":`+status+`,"result":`+string(text)+"}\n")
+				wantAttempts := 2
+				wantFailure := mode == "exhausted" || mode == "permanent"
+				if mode == "exhausted" {
+					t.Setenv("NM_CLAUDE_STDIN_TRANSIENT_REMAIN", "10")
+					wantAttempts = 4 // Initial invocation plus three bounded retries.
+				} else if mode == "permanent" {
+					wantAttempts = 1
+				}
+				attempts := 0
+				opts := RunOpts{
+					Prompt:    "review",
+					CWD:       t.TempDir(),
+					OnAttempt: func(Attempt) { attempts++ },
+				}
+				if mode == "resume" {
+					opts.Session = &SessionRef{ID: "helper-session"}
+					t.Setenv("NM_CLAUDE_STDIN_EXPECT_RESUME", "helper-session")
+				}
+				res, err := newClaudeStdinHelperAgent(t).Run(context.Background(), opts)
+				if attempts != wantAttempts {
+					t.Errorf("attempts = %d, want %d", attempts, wantAttempts)
+				}
+				if wantFailure {
+					if err == nil || !strings.Contains(err.Error(), message) {
+						t.Fatalf("error = %v, want terminal diagnostic %q", err, message)
+					}
+				} else if err != nil || res == nil || string(res.Output) != `{"ok":true}` {
+					t.Fatalf("Run = %+v, %v, want recovered structured output", res, err)
+				}
+			})
+		}
+	}
+}
+
+func TestClaudeAgent_NonzeroExitAfterUsableResultFinalizesIt(t *testing.T) {
+	t.Setenv("NM_CLAUDE_STDIN_HELPER", "result-then-fail")
+	a := newClaudeStdinHelperAgent(t)
+
+	res, err := a.Run(context.Background(), RunOpts{
+		Prompt:     "review",
+		CWD:        t.TempDir(),
+		JSONSchema: json.RawMessage(`{"type":"object","required":["ok"]}`),
+	})
+	if err != nil {
+		t.Fatalf("Run = %v, want the finished result despite the nonzero exit", err)
+	}
+	if string(res.Output) != `{"ok":true}` {
+		t.Errorf("Output = %s, want {\"ok\":true}", res.Output)
+	}
+}
+
+func TestClaudeAgent_NonzeroExitAfterTextResultIsAcceptedAndNoted(t *testing.T) {
+	t.Setenv("NM_CLAUDE_STDIN_HELPER", "result-then-fail")
+	a := newClaudeStdinHelperAgent(t)
+
+	var chunks []string
+	res, err := a.Run(context.Background(), RunOpts{
+		Prompt:  "review",
+		CWD:     t.TempDir(),
+		OnChunk: func(s string) { chunks = append(chunks, s) },
+	})
+	if err != nil {
+		t.Fatalf("Run = %v, want the finished text result despite the nonzero exit", err)
+	}
+	if res.Text != "ok" {
+		t.Errorf("Text = %q, want ok", res.Text)
+	}
+	if !strings.Contains(strings.Join(chunks, "\n"), "claude exited after completing its result: exit status 1") {
+		t.Errorf("chunks = %q, want the exit note", chunks)
+	}
+}
+
+func TestClaudeAgent_NonzeroExitAfterResultMissingStructuredOutputFails(t *testing.T) {
+	t.Setenv("NM_CLAUDE_STDIN_HELPER", "unstructured-result-then-fail")
+	a := newClaudeStdinHelperAgent(t)
+
+	_, err := a.runOnce(context.Background(), RunOpts{
+		Prompt:     "review",
+		CWD:        t.TempDir(),
+		JSONSchema: json.RawMessage(`{"type":"object"}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "claude exited: exit status 1") {
+		t.Fatalf("err = %v, want the exit error", err)
+	}
+}
+
+func TestClaudeStdoutTail(t *testing.T) {
+	long := strings.Repeat("x", 5000)
+	for _, tc := range []struct {
+		name   string
+		writes []string
+		want   string
+	}{
+		{name: "split writes", writes: []string{"usage li", "mit reached\n"}, want: "stdout: usage limit reached"},
+		{name: "final line without newline", writes: []string{"first\nlast words"}, want: "stdout: first | last words"},
+		{name: "event lines filtered", writes: []string{"{\"type\":\"assistant\"}\nbanner\n{\"type\":\"result\"}\n"}, want: "stdout: banner"},
+		{name: "three line limit", writes: []string{"a\nb\nc\nd\n"}, want: "stdout: b | c | d"},
+		{name: "long line is truncated", writes: []string{long + "\nafter\n"}, want: "stdout: " + strings.Repeat("x", claudeStdoutTailLineRune) + "... | after"},
+		{name: "long line spanning writes is truncated once", writes: []string{long, long, "\nafter\n"}, want: "stdout: " + strings.Repeat("x", claudeStdoutTailLineRune) + "... | after"},
+		{name: "long unterminated line", writes: []string{long}, want: "stdout: " + strings.Repeat("x", claudeStdoutTailLineRune) + "..."},
+		{name: "nothing", writes: []string{"\n  \n"}, want: claudeNoOutputEvidence},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var tail claudeStdoutTail
+			for _, w := range tc.writes {
+				if _, err := tail.Write([]byte(w)); err != nil {
+					t.Fatalf("Write: %v", err)
+				}
+			}
+			if got := tail.evidence(nil); got != tc.want {
+				t.Errorf("evidence = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaudeAgent_NonzeroExitStillFailsWhenNativeChildrenMustComplete(t *testing.T) {
+	t.Setenv("NM_CLAUDE_STDIN_HELPER", "result-then-fail")
+	a := newClaudeStdinHelperAgent(t)
+
+	_, err := a.runOnce(context.Background(), RunOpts{
+		Prompt:                   "test",
+		CWD:                      t.TempDir(),
+		JSONSchema:               json.RawMessage(`{"type":"object","required":["ok"]}`),
+		RequireCompletedChildren: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "claude exited: exit status 1") {
+		t.Fatalf("err = %v, want the exit error", err)
+	}
+}
+
+func TestClaudeAgent_NonzeroExitWithoutUsableResultStillFails(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fixture string
+	}{
+		{name: "no output"},
+		{name: "error result", fixture: "claude_prose_429_max_turns.jsonl"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := ""
+			if tc.fixture != "" {
+				fixture, _ = filepath.Abs(filepath.Join("testdata", tc.fixture))
+			}
+			t.Setenv("NM_CLAUDE_STDIN_HELPER", "replay-then-fail")
+			t.Setenv("NM_CLAUDE_STDIN_FIXTURE", fixture)
+			a := newClaudeStdinHelperAgent(t)
+			_, err := a.runOnce(context.Background(), RunOpts{
+				Prompt:     "review",
+				CWD:        t.TempDir(),
+				JSONSchema: json.RawMessage(`{"type":"object"}`),
+			})
+			if err == nil || !strings.Contains(err.Error(), "claude exited: exit status 1") {
+				t.Fatalf("err = %v, want the exit error", err)
 			}
 		})
 	}
@@ -859,6 +1087,37 @@ func TestClaudeStdinHelper(t *testing.T) {
 			}
 			_, _ = os.Stdout.Write(stream)
 		}
+		_, _ = io.WriteString(os.Stdout, os.Getenv("NM_CLAUDE_STDIN_BANNER"))
+		os.Exit(1)
+	case "transient-then-succeed":
+		// Validate each subprocess invocation, including retries, against the
+		// caller's requested conversation before emitting any result.
+		if session := os.Getenv("NM_CLAUDE_STDIN_EXPECT_RESUME"); session != "" && !claudeArgsContainPair(args, "--resume", session) {
+			t.Fatalf("argv %v missing --resume %s", args, session)
+		}
+		// Fails NM_CLAUDE_STDIN_TRANSIENT_REMAIN invocations (banner on stdout,
+		// exit 1), counted through NM_CLAUDE_STDIN_COUNT_FILE because every
+		// retry attempt is a fresh process, then emits a success result.
+		remain := 0
+		if v := os.Getenv("NM_CLAUDE_STDIN_TRANSIENT_REMAIN"); v != "" {
+			remain, _ = strconv.Atoi(v)
+		}
+		count := 0
+		if data, err := os.ReadFile(os.Getenv("NM_CLAUDE_STDIN_COUNT_FILE")); err == nil {
+			count, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+		}
+		if count < remain {
+			_ = os.WriteFile(os.Getenv("NM_CLAUDE_STDIN_COUNT_FILE"), []byte(strconv.Itoa(count+1)), 0o644)
+			_, _ = io.WriteString(os.Stdout, os.Getenv("NM_CLAUDE_STDIN_BANNER"))
+			os.Exit(1)
+		}
+		emitClaudeHelperResult()
+		return
+	case "result-then-fail":
+		emitClaudeHelperResult()
+		os.Exit(1)
+	case "unstructured-result-then-fail":
+		_, _ = io.WriteString(os.Stdout, `{"type":"result","subtype":"success","session_id":"helper-session"}`+"\n")
 		os.Exit(1)
 	case "read":
 		prompt, err := io.ReadAll(os.Stdin)

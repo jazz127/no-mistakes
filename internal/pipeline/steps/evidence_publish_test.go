@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -121,6 +122,20 @@ func TestPublishRunEvidence_LandsOnOrphanBranchAndLinksFromThePRBody(t *testing.
 	}
 	if strings.Contains(md, "local file:") {
 		t.Fatalf("published evidence must not render as a local path, got:\n%s", md)
+	}
+
+	// Expanded rendering previews the same committed image without losing
+	// either artifact's commit-pinned source link.
+	md = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, evidenceDir, links, scm.ProviderGitHub, nil, false)
+	for _, want := range []string{
+		"![Checkout screenshot](https://raw.githubusercontent.com/example/widgets/" + tip + "/.no-mistakes/evidence/feature/add-login/checkout.png)",
+		"- Evidence: [Checkout screenshot](" + wantLink + ")",
+		"- Evidence: [CLI run](https://github.com/example/widgets/blob/" + tip + "/.no-mistakes/evidence/feature/add-login/cli-run.txt)",
+		"```text\nit works\n```",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("expanded PR body missing %q:\n%s", want, md)
+		}
 	}
 
 	// Neither the default branch nor the run's own branch carries evidence.
@@ -328,5 +343,23 @@ func TestPublishRunEvidence_NeverPublishesTheReviewConversation(t *testing.T) {
 		if strings.Contains(tree, unwanted) {
 			t.Fatalf("the review conversation reached the evidence branch (%q):\n%s", unwanted, tree)
 		}
+	}
+}
+
+func TestPublishRunEvidence_RedactsRunWorktreePaths(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	sctx, remote := newEvidencePublishContext(t, "feature/add-login")
+	other := filepath.Join(nmHome, "worktrees", "ab12cd34ef56", "run-0", "out.log")
+	writeRunEvidence(t, sctx, map[string]string{
+		"cli-run.txt": "ran " + filepath.Join(sctx.WorkDir, "bin", "tool") + "\nsaw " + other + "\n",
+	})
+
+	if links := publishRunEvidence(sctx); links == nil {
+		t.Fatal("evidence did not publish")
+	}
+	got := gitCmd(t, remote, "cat-file", "-p", "refs/heads/no-mistakes/evidence:.no-mistakes/evidence/feature/add-login/cli-run.txt")
+	if want := "ran " + filepath.Join("{run-worktree}", "bin", "tool") + "\nsaw " + filepath.Join("{run-worktree}", "out.log"); got != want {
+		t.Errorf("published text = %q, want %q", got, want)
 	}
 }

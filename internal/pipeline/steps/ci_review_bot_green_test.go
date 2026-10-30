@@ -340,10 +340,11 @@ func TestCIObservationFindings_GreenReviewBotCommentsFollowThePolicy(t *testing.
 // be posting, so only a completed check counts.
 func TestGreenReviewBotChecksExcludesPendingAndFailing(t *testing.T) {
 	t.Parallel()
-	got := greenReviewBotChecks([]scm.Check{
+	got := greenReviewBotChecks(scm.ReviewBotsFor([]string{"coderabbit"}), []scm.Check{
 		{Name: "Greptile pending", Bucket: scm.CheckBucketPending, App: "greptile-apps"},
 		{Name: "Greptile red", Bucket: scm.CheckBucketFail, App: "greptile-apps"},
 		{Name: "Greptile cancelled", Bucket: scm.CheckBucketCancel, App: "greptile-apps"},
+		{Name: "CodeRabbit pending", Bucket: scm.CheckBucketPending, App: "coderabbitai", AppID: scm.CodeRabbitAppID, AppHost: "github.com"},
 		{Name: "build", Bucket: scm.CheckBucketPass, App: "github-actions"},
 		{Name: "Greptile green", Bucket: scm.CheckBucketPass, App: "greptile-apps"},
 		{Name: "Greptile neutral", Bucket: scm.CheckBucketSkip, App: "greptile-apps"},

@@ -259,6 +259,13 @@ func fakeGHHandler(args []string) {
 			os.Exit(0)
 		}
 		fakeGHStorePRBody(args)
+		if os.Getenv("FAKE_CLI_PR_CREATE_REWRITE_BODY") == "1" {
+			if path := os.Getenv("FAKE_CLI_PR_BODY_FILE"); path != "" {
+				if data, err := os.ReadFile(path); err == nil {
+					_ = os.WriteFile(path, append(data, []byte("\nrewritten by host\n")...), 0o644)
+				}
+			}
+		}
 		fmt.Println("https://github.com/test/repo/pull/99")
 		os.Exit(0)
 	}
@@ -430,6 +437,29 @@ func fakeGitRemoteErrorHandler(args []string) {
 }
 
 func fakePRHeadSHA() string {
+	if raw := os.Getenv("FAKE_CLI_PR_HEAD_SEQUENCE"); raw != "" {
+		var heads []string
+		if err := json.Unmarshal([]byte(raw), &heads); err != nil || len(heads) == 0 {
+			os.Exit(1)
+		}
+		indexPath := os.Getenv("FAKE_CLI_PR_HEAD_INDEX")
+		index := 0
+		if data, err := os.ReadFile(indexPath); err == nil {
+			index, _ = strconv.Atoi(string(data))
+		}
+		if err := os.WriteFile(indexPath, []byte(strconv.Itoa(index+1)), 0o600); err != nil {
+			os.Exit(1)
+		}
+		if index >= len(heads) {
+			index = len(heads) - 1
+		}
+		if heads[index] == "ERROR" {
+			fmt.Fprintln(os.Stderr, "head lookup failed")
+			os.Exit(1)
+		}
+		return heads[index]
+	}
+
 	configured := os.Getenv("FAKE_CLI_PR_HEAD_SHA")
 	if os.Getenv("FAKE_CLI_HEAD_FROM_WORKTREE") != "1" || configured != "deadbeef" {
 		return configured
@@ -739,6 +769,15 @@ func fakeCIGHHandler(args []string) {
 		fmt.Println(checksJSON)
 		os.Exit(0)
 	}
+	if strings.Contains(joined, "api") && strings.Contains(joined, "/check-runs") {
+		if payload := os.Getenv("FAKE_CLI_EXTERNAL_REVIEWS"); payload != "" {
+			fmt.Println(payload)
+			os.Exit(0)
+		}
+		fmt.Fprintln(os.Stderr, "unexpected external review read")
+		os.Exit(1)
+	}
+
 	if strings.Contains(joined, "api") && strings.Contains(joined, "graphql") {
 		if strings.Contains(joined, "reviewThreads") {
 			printFakeReviewThreads(os.Getenv("FAKE_CLI_REVIEW_COMMENTS"))
@@ -1017,13 +1056,15 @@ func fakeCIGlabIsStatusChecksRead(joined string) bool {
 }
 
 // fakePipelineStatus derives a pipeline status from a job list the way GitLab
-// aggregates one: any failed job fails the pipeline, any cancelled job cancels
-// it, a job still in flight keeps it running, and jobs that all finished
-// cleanly pass it. An explicit FAKE_CLI_PIPELINE_STATUS overrides the
-// derivation, which is how a test states a pipeline whose reported status no
-// job list explains (a pipeline that failed before creating a job). An empty
-// job list derives "success"; the empty-jobs failure is exactly the case an
-// explicit override is for.
+// aggregates one: a job still in flight keeps it running, a blocking manual job
+// stops it at that stage (status "manual"), a failed job fails it, a cancelled
+// job cancels it, and jobs that all finished cleanly pass it. The manual check
+// follows GitLab's own precedence, which reads a blocking manual job before a
+// failure. An explicit FAKE_CLI_PIPELINE_STATUS overrides the derivation, which
+// is how a test states a pipeline whose reported status no job list explains (a
+// pipeline that failed before creating a job). An empty job list derives
+// "success"; the empty-jobs failure is exactly the case an explicit override is
+// for.
 func fakePipelineStatus(checksJSON string) string {
 	if override := os.Getenv("FAKE_CLI_PIPELINE_STATUS"); override != "" {
 		return override
@@ -1035,24 +1076,35 @@ func fakePipelineStatus(checksJSON string) string {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(checksJSON)), &jobs); err != nil || len(jobs) == 0 {
 		return "success"
 	}
-	status := "success"
+	var running, manualBlocked, failed, canceled bool
 	for _, job := range jobs {
 		switch strings.ToLower(strings.TrimSpace(job.Status)) {
 		case "failed":
-			if job.AllowFailure {
-				continue
+			if !job.AllowFailure {
+				failed = true
 			}
-			return "failed"
 		case "canceled", "cancelled":
-			status = "canceled"
-		case "success", "skipped", "manual":
-		default:
-			if status != "canceled" {
-				status = "running"
+			canceled = true
+		case "manual":
+			if !job.AllowFailure {
+				manualBlocked = true
 			}
+		case "success", "skipped":
+		default:
+			running = true
 		}
 	}
-	return status
+	switch {
+	case running:
+		return "running"
+	case manualBlocked:
+		return "manual"
+	case failed:
+		return "failed"
+	case canceled:
+		return "canceled"
+	}
+	return "success"
 }
 
 // fakeGlabTriggerJobs serves the pipeline's trigger jobs on whichever route
@@ -1251,6 +1303,7 @@ func printFakeWorkflowRuns() {
 
 func printFakeCommitChecks(raw string, args []string) {
 	var checks []struct {
+		ID          int64  `json:"id"`
 		Name        string `json:"name"`
 		State       string `json:"state"`
 		Status      string `json:"status"`
@@ -1260,7 +1313,8 @@ func printFakeCommitChecks(raw string, args []string) {
 		Link        string `json:"link"`
 		// App is the check suite's app slug, rendered the way GitHub's
 		// GraphQL rollup reports it (checkSuite.app.slug). Empty omits it.
-		App string `json:"app"`
+		App   string `json:"app"`
+		AppID int64  `json:"app_id"`
 	}
 	if err := json.Unmarshal([]byte(raw), &checks); err != nil {
 		fmt.Println(raw)
@@ -1297,11 +1351,11 @@ func printFakeCommitChecks(raw string, args []string) {
 			link = strings.Replace(link, "github.com/test/repo/", "github.com/"+repo+"/", 1)
 		}
 		node := map[string]any{
-			"__typename": "CheckRun", "name": check.Name, "status": status,
+			"__typename": "CheckRun", "databaseId": check.ID, "name": check.Name, "status": status,
 			"conclusion": conclusion, "completedAt": check.CompletedAt, "detailsUrl": link,
 		}
 		if check.App != "" {
-			node["checkSuite"] = map[string]any{"app": map[string]any{"slug": check.App}}
+			node["checkSuite"] = map[string]any{"app": map[string]any{"slug": check.App, "databaseId": check.AppID}}
 		}
 		nodes = append(nodes, node)
 	}
@@ -1333,10 +1387,11 @@ func printFakeCommitChecks(raw string, args []string) {
 // comment. An empty or invalid value renders a pull request with no threads.
 func printFakeReviewThreads(raw string) {
 	var comments []struct {
-		Author string `json:"author"`
-		Path   string `json:"path"`
-		Line   int    `json:"line"`
-		Body   string `json:"body"`
+		Author   string `json:"author"`
+		AuthorID int64  `json:"author_id"`
+		Path     string `json:"path"`
+		Line     int    `json:"line"`
+		Body     string `json:"body"`
 	}
 	if raw != "" {
 		if err := json.Unmarshal([]byte(raw), &comments); err != nil {
@@ -1356,7 +1411,7 @@ func printFakeReviewThreads(raw string) {
 					"line":       comment.Line,
 					"url":        fmt.Sprintf("https://github.com/test/repo/pull/42#discussion_r%d", i+1),
 					"createdAt":  "2026-09-07T00:00:00Z",
-					"author":     map[string]any{"login": comment.Author},
+					"author":     map[string]any{"login": comment.Author, "databaseId": comment.AuthorID},
 				}},
 			},
 		})

@@ -32,6 +32,7 @@ const (
 	MethodRespond                   = "respond"
 	MethodAnswerReview              = "answer_review_question"
 	MethodCancelRun                 = "cancel_run"
+	MethodHandoffRun                = "handoff_run"
 	MethodGateContext               = "gate_context"
 	MethodAdmitPush                 = "admit_push"
 	MethodHealth                    = "health"
@@ -50,10 +51,11 @@ const (
 
 // Request is a JSON-RPC 2.0 request.
 type Request struct {
-	JSONRPC string          `json:"jsonrpc"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
-	ID      int64           `json:"id"`
+	JSONRPC          string          `json:"jsonrpc"`
+	Method           string          `json:"method"`
+	Params           json.RawMessage `json:"params,omitempty"`
+	ID               int64           `json:"id"`
+	DeadlineUnixNano int64           `json:"deadline_unix_nano,omitempty"`
 }
 
 // Response is a JSON-RPC 2.0 response.
@@ -290,8 +292,11 @@ type RespondParams struct {
 	FindingIDs       []string             `json:"finding_ids,omitempty"`
 	IgnoreFindingIDs []string             `json:"ignore_finding_ids,omitempty"`
 	Instructions     map[string]string    `json:"instructions,omitempty"`
-	AddedFindings    []types.Finding      `json:"added_findings,omitempty"`
-	ApprovalReason   string               `json:"approval_reason,omitempty"` // Test approval only
+	// InstructionsFromDriver marks Instructions as an agent driver's fix
+	// guidance rather than the user's own words.
+	InstructionsFromDriver bool            `json:"instructions_from_driver,omitempty"`
+	AddedFindings          []types.Finding `json:"added_findings,omitempty"`
+	ApprovalReason         string          `json:"approval_reason,omitempty"` // Test approval, or the reason recorded with an abort
 }
 
 type CoverageBinding struct {

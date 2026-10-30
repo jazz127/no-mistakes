@@ -51,9 +51,21 @@ jobs:
           - os: windows-latest
             name: test (windows-git)
             shard: git
+          # pipeline/steps is split by test name. The last row skips the union
+          # of the other rows' patterns, so a new test always lands in exactly
+          # one shard; rebalance the ranges against the shards' -v timings.
           - os: windows-latest
-            name: test (windows-steps)
+            name: test (windows-steps-1)
             shard: steps
+            steps_run: '^Test[A-K]'
+          - os: windows-latest
+            name: test (windows-steps-2)
+            shard: steps
+            steps_run: '^Test[L-Q]'
+          - os: windows-latest
+            name: test (windows-steps-3)
+            shard: steps
+            steps_skip: '^Test[A-Q]'
     runs-on: ${{ matrix.os }}
     # Sized for each Windows shard, which still sets the floor: git.exe plus
     # Defender tax makes git-backed packages ~10x their Linux time (see the
@@ -110,9 +122,9 @@ jobs:
       # Git-heavy packages are the Windows wall floor. NM_CI_WINDOWS_GIT_EXCLUDE
       # on the core shard is the union of the git and steps shards; the workflow
       # tests resolve every shard through `go list` and fail if they drift or
-      # overlap. pipeline/steps is its own shard (~10 min) so it runs in
-      # parallel with the remaining git-heavy packages instead of setting a
-      # ~21 min serial floor.
+      # overlap. pipeline/steps is its own shard so it runs in parallel with
+      # the remaining git-heavy packages instead of setting a ~21 min serial
+      # floor.
       - name: Test on Windows (git-heavy)
         if: runner.os == 'Windows' && matrix.shard == 'git'
         # branchsync exhausted 15m with healthy tests still queued.
@@ -121,9 +133,11 @@ jobs:
 
       - name: Test on Windows (pipeline/steps)
         if: runner.os == 'Windows' && matrix.shard == 'steps'
-        # The expanded suite exceeded 15m with healthy tests still queued.
-        # Leave completion headroom while staying below the 40m job cap.
-        run: go test -v -timeout=20m ./internal/pipeline/steps/...
+        shell: pwsh
+        env:
+          NM_CI_WINDOWS_STEPS_RUN: ${{ matrix.steps_run }}
+          NM_CI_WINDOWS_STEPS_SKIP: ${{ matrix.steps_skip }}
+        run: go test -v -timeout=20m "-run=$env:NM_CI_WINDOWS_STEPS_RUN" "-skip=$env:NM_CI_WINDOWS_STEPS_SKIP" ./internal/pipeline/steps/...
 
       - name: Test on Windows (core)
         if: runner.os == 'Windows' && matrix.shard == 'core'

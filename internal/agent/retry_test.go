@@ -61,6 +61,39 @@ func TestClassifyTransient_Positive(t *testing.T) {
 			wantSub: "dns",
 		},
 		{
+			// The exact failure shape behind the 2026-09-27 EAI_AGAIN incident:
+			// the CLI's plain-text banner on stdout, an empty stderr, and no
+			// result event carrying api_error_status.
+			name:    "claude stdout EAI_AGAIN banner",
+			errMsg:  `claude exited: exit status 1: stdout: API Error: Can't reach the API server — check your internet or DNS (EAI_AGAIN)`,
+			wantSub: "dns",
+		},
+		{
+			name:    "node dns temporary failure errno",
+			errMsg:  `claude exited: exit status 1: getaddrinfo EAI_AGAIN api.anthropic.com`,
+			wantSub: "dns",
+		},
+		{
+			name:    "node dns notfound errno",
+			errMsg:  `codex exited: exit status 1: getaddrinfo ENOTFOUND api.anthropic.com`,
+			wantSub: "dns",
+		},
+		{
+			name:    "node connection refused errno",
+			errMsg:  `codex exited: exit status 1: connect ECONNREFUSED 104.18.32.47:443`,
+			wantSub: "connection refused",
+		},
+		{
+			name:    "node connection reset errno",
+			errMsg:  `pi exited: exit status 1: read ECONNRESET`,
+			wantSub: "connection reset",
+		},
+		{
+			name:    "node connect timeout errno",
+			errMsg:  `grok exited: exit status 1: connect ETIMEDOUT 1.2.3.4:443`,
+			wantSub: "timeout",
+		},
+		{
 			name:    "tls handshake",
 			errMsg:  `Post "https://api.anthropic.com": net/http: TLS handshake timeout`,
 			wantSub: "tls",
@@ -563,29 +596,49 @@ func TestClaudeRetryClassifier_ReportedAPIErrorDecidesAlone(t *testing.T) {
 	}{
 		{
 			name:      "transient status",
-			err:       claudeExitError(exit, "", &claudeAPIError{Status: 503, Message: "API Error: 503"}),
+			err:       claudeExitError(exit, "", &claudeAPIError{Status: 503, Message: "API Error: 503"}, ""),
 			wantLabel: "http 503",
 			wantRetry: true,
 		},
 		{
 			name: "exhausted quota behind a transient status",
-			err:  claudeExitError(exit, "", &claudeAPIError{Status: 429, Message: "API Error: 429 You exceeded your current quota"}),
+			err:  claudeExitError(exit, "", &claudeAPIError{Status: 429, Message: "API Error: 429 You exceeded your current quota"}, ""),
 		},
 		{
 			name: "exhausted quota behind the displayed message cut",
-			err:  claudeExitError(exit, "", &claudeAPIError{Status: 429, Message: strings.Repeat("x", claudeAPIErrorMessageMaxRunes+50) + " quota exceeded"}),
+			err:  claudeExitError(exit, "", &claudeAPIError{Status: 429, Message: strings.Repeat("x", claudeAPIErrorMessageMaxRunes+50) + " quota exceeded"}, ""),
 		},
 		{
 			name: "permanent status beside transient-looking stderr",
-			err:  claudeExitError(exit, "upstream proxy returned 503", &claudeAPIError{Status: 400, Message: "API Error: 400"}),
+			err:  claudeExitError(exit, "upstream proxy returned 503", &claudeAPIError{Status: 400, Message: "API Error: 400"}, ""),
 		},
 		{
 			name: "cancelled invocation",
-			err:  claudeExitError(context.Canceled, "", &claudeAPIError{Status: 529, Message: "API Error: 529"}),
+			err:  claudeExitError(context.Canceled, "", &claudeAPIError{Status: 529, Message: "API Error: 529"}, ""),
+		},
+		{
+			name: "authentication status outranks timeout text",
+			err:  claudeExitError(exit, "", &claudeAPIError{Status: 401, Message: "Request timed out"}, ""),
+		},
+		{
+			name: "usage limit outranks timeout text",
+			err:  claudeExitError(exit, "", &claudeAPIError{Message: "Request timed out", usageLimitReached: true}, ""),
+		},
+		{
+			name: "quota diagnostic outranks timeout text",
+			err:  claudeExitError(exit, "", &claudeAPIError{Message: "Request timed out: quota exceeded"}, ""),
+		},
+		{
+			name: "cancellation outranks timeout text",
+			err:  claudeExitError(context.Canceled, "", &claudeAPIError{Message: "Request timed out"}, ""),
+		},
+		{
+			name: "deadline outranks timeout text",
+			err:  claudeExitError(context.DeadlineExceeded, "", &claudeAPIError{Message: "Request timed out"}, ""),
 		},
 		{
 			name:      "stderr alone",
-			err:       claudeExitError(exit, "HTTP 529 from api.anthropic.com", nil),
+			err:       claudeExitError(exit, "HTTP 529 from api.anthropic.com", nil, ""),
 			wantLabel: "http 529",
 			wantRetry: true,
 		},

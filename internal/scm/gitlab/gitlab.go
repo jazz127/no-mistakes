@@ -181,6 +181,33 @@ func (h *Host) Available(ctx context.Context) error {
 	return nil
 }
 
+// parseMergeRequestURL accepts a separate web host only when the operator's
+// global glab configuration binds it to this remote's host. --global excludes
+// repository-local configuration; the MR response itself is never authority for
+// an alternate host. Use the command factory so forge-profile environments apply.
+func (h *Host) parseMergeRequestURL(ctx context.Context, raw string) (int, error) {
+	number, err := parseMergeRequestURL(raw, h.host, h.projectPath)
+	if err == nil || h.host == "" {
+		return number, err
+	}
+	parsed, parseErr := url.Parse(strings.TrimSpace(raw))
+	if parseErr != nil || parsed.Hostname() == "" || strings.EqualFold(parsed.Hostname(), h.host) {
+		return 0, err
+	}
+	out, configErr := h.cmd(ctx, "glab", "config", "get", "api_host", "--host", h.host, "--global").Output()
+	if configErr != nil {
+		return 0, fmt.Errorf("%w (cannot read global glab api_host: %v)", err, configErr)
+	}
+	// api_host is a host[:port], not a URL or a path. Reject malformed or
+	// empty output rather than allowing the parser's legacy unscoped mode.
+	apiHost := strings.TrimSpace(string(out))
+	configured, configErr := url.Parse("https://" + apiHost)
+	if configErr != nil || apiHost == "" || strings.ContainsAny(apiHost, "/?#@\\\t\r\n ") || configured.Hostname() == "" {
+		return 0, fmt.Errorf("%w (invalid global glab api_host)", err)
+	}
+	return parseMergeRequestURL(raw, configured.Hostname(), h.projectPath)
+}
+
 func parseMergeRequestURL(raw, expectedHost, expectedProject string) (int, error) {
 	trimmed := strings.TrimSpace(raw)
 	parsed, err := url.Parse(trimmed)
@@ -301,6 +328,14 @@ func (p gitlabHeadPipeline) completedAt() time.Time {
 	return time.Time{}
 }
 
+// awaitingManualJob reports whether the pipeline's own status says a person
+// must act before it can finish: GitLab reports `manual` for a pipeline stopped
+// at a blocking manual job. It is the aggregate form of the job-level rule, for
+// when no job or trigger-job row carries the wait itself.
+func (p gitlabHeadPipeline) awaitingManualJob() bool {
+	return strings.EqualFold(strings.TrimSpace(p.Status), "manual")
+}
+
 // sourceRevision is the source-branch commit the merge request currently points
 // at, or "" when neither of the fields that carry it was reported. Both fields
 // are read, never assumed: a check read that cannot name the revision it is
@@ -387,7 +422,7 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 		if url == "" {
 			return nil, fmt.Errorf("parse glab mr list JSON: entry %d missing merge request URL", i)
 		}
-		number, err := parseMergeRequestURL(url, h.host, h.projectPath)
+		number, err := h.parseMergeRequestURL(ctx, url)
 		if err != nil {
 			return nil, fmt.Errorf("parse glab mr list JSON: entry %d invalid merge request URL: %w", i, err)
 		}
@@ -576,6 +611,7 @@ func (h *Host) viewMR(ctx context.Context, id string) (mrPayload, error) {
 // never as an unreadable check; any other failure is a read failure and stays
 // one, because "unreadable" must not look green either.
 func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
+	pr.ObservedHeadSHA = ""
 	if headSHA := strings.TrimSpace(pr.HeadSHA); headSHA != "" {
 		return h.getChecksForHead(ctx, pr, headSHA)
 	}
@@ -692,6 +728,7 @@ func (h *Host) getChecksForHead(ctx context.Context, pr *scm.PR, headSHA string)
 	if err != nil {
 		return nil, err
 	}
+	pr.ObservedHeadSHA = mr.sourceRevision()
 	pipeline, err := h.headPipelineBoundTo(ctx, pr, mr, headSHA)
 	if err != nil {
 		return nil, err
@@ -705,6 +742,9 @@ func (h *Host) getChecksForHead(ctx context.Context, pr *scm.PR, headSHA string)
 		afterMR, err := h.viewMR(ctx, pr.Number)
 		if err != nil {
 			return err
+		}
+		if revision := afterMR.sourceRevision(); revision != "" {
+			pr.ObservedHeadSHA = revision
 		}
 		if revision := afterMR.sourceRevision(); revision == "" {
 			return fmt.Errorf("merge request %s reported no source commit", pr.Number)
@@ -1062,11 +1102,37 @@ type gitlabJob struct {
 // is non-blocking in GitLab (the pipeline is green, shown as "passed with
 // warnings"), so it maps to CheckBucketSkip like other non-blocking outcomes
 // instead of CheckBucketFail.
+//
+// A manual job's bucket depends on the same flag, and the two readings are
+// opposites. A blocking manual job (`allow_failure: false`, the default for
+// `when: manual` inside `rules`) stops the pipeline at its stage until a person
+// runs it, and GitLab's own merge rules treat that pipeline as
+// unfinished; mapping it to a skip lets a merge request read as ready while
+// GitLab would refuse to merge it. It maps to CheckBucketPending instead - the
+// job is waiting on a person, not finished - and jobsToChecks marks it
+// AwaitingManualJob so the CI step names the wait and keeps it away from the
+// fix agent. An optional manual job (`allow_failure: true`, the default outside
+// `rules`) is one GitLab does not wait for - the pipeline can succeed without
+// it - so it stays a skip.
 func (j gitlabJob) bucket() scm.CheckBucket {
-	if j.AllowFailure && strings.EqualFold(strings.TrimSpace(j.Status), "failed") {
+	status := strings.ToLower(strings.TrimSpace(j.Status))
+	switch {
+	case status == "manual":
+		if j.AllowFailure {
+			return scm.CheckBucketSkip
+		}
+		return scm.CheckBucketPending
+	case j.AllowFailure && status == "failed":
 		return scm.CheckBucketSkip
 	}
 	return gitlabStatusBucket(j.Status)
+}
+
+// awaitingManualJob reports whether the job is a blocking manual job: GitLab
+// holds the pipeline at it until a person runs it. It is the one
+// pending check that cannot progress on its own and that no rerun can clear.
+func (j gitlabJob) awaitingManualJob() bool {
+	return strings.EqualFold(strings.TrimSpace(j.Status), "manual") && !j.AllowFailure
 }
 
 // completedAt parses the job's finished_at timestamp, returning the zero time
@@ -1302,13 +1368,14 @@ func jobsToChecks(jobs []gitlabJob) []scm.Check {
 	checks := make([]scm.Check, 0, len(jobs))
 	for _, job := range jobs {
 		checks = append(checks, scm.Check{
-			Name:        job.Name,
-			ProviderID:  gitlabJobProviderID("gitlab-job", job.ID),
-			Bucket:      job.bucket(),
-			Kind:        scm.CheckKindRun,
-			State:       gitlabCheckState(job.Status),
-			CompletedAt: job.completedAt(),
-			Link:        strings.TrimSpace(job.WebURL),
+			Name:              job.Name,
+			ProviderID:        gitlabJobProviderID("gitlab-job", job.ID),
+			Bucket:            job.bucket(),
+			Kind:              scm.CheckKindRun,
+			State:             gitlabCheckState(job.Status),
+			CompletedAt:       job.completedAt(),
+			Link:              strings.TrimSpace(job.WebURL),
+			AwaitingManualJob: job.awaitingManualJob(),
 		})
 	}
 	return checks
@@ -1330,13 +1397,14 @@ func triggerJobsToChecks(jobs []gitlabTriggerJob) []scm.Check {
 			}
 		}
 		checks = append(checks, scm.Check{
-			Name:        job.Name,
-			ProviderID:  gitlabJobProviderID("gitlab-trigger-job", job.ID),
-			Bucket:      job.bucket(),
-			Kind:        scm.CheckKindRun,
-			State:       gitlabCheckState(job.Status),
-			CompletedAt: job.completedAt(),
-			Link:        link,
+			Name:              job.Name,
+			ProviderID:        gitlabJobProviderID("gitlab-trigger-job", job.ID),
+			Bucket:            job.bucket(),
+			Kind:              scm.CheckKindRun,
+			State:             gitlabCheckState(job.Status),
+			CompletedAt:       job.completedAt(),
+			Link:              link,
+			AwaitingManualJob: job.awaitingManualJob(),
 		})
 	}
 	return checks
@@ -1391,13 +1459,14 @@ func pipelineAggregateCheck(pipeline gitlabHeadPipeline, checks []scm.Check) (sc
 		}
 	}
 	return scm.Check{
-		Name:        fmt.Sprintf("Pipeline #%d", pipeline.ID),
-		ProviderID:  "gitlab-pipeline:" + strconv.Itoa(pipeline.ID),
-		Bucket:      bucket,
-		Kind:        scm.CheckKindRun,
-		State:       gitlabCheckState(pipeline.Status),
-		CompletedAt: pipeline.completedAt(),
-		Link:        strings.TrimSpace(pipeline.WebURL),
+		Name:              fmt.Sprintf("Pipeline #%d", pipeline.ID),
+		ProviderID:        "gitlab-pipeline:" + strconv.Itoa(pipeline.ID),
+		Bucket:            bucket,
+		Kind:              scm.CheckKindRun,
+		State:             gitlabCheckState(pipeline.Status),
+		CompletedAt:       pipeline.completedAt(),
+		Link:              strings.TrimSpace(pipeline.WebURL),
+		AwaitingManualJob: pipeline.awaitingManualJob(),
 	}, true
 }
 
@@ -1445,6 +1514,14 @@ func findFailedJobTargetIDs(out []byte, checkTargets []scm.CheckTarget) []int {
 	return matched
 }
 
+// gitlabStatusBucket maps a raw provider state - a job's or a pipeline's -
+// onto the shared bucket, ignoring job-level policy; gitlabJob.bucket applies
+// allow_failure on top for the jobs it maps. `manual` is a wait on a person,
+// not a finished state: a pipeline's own status is `manual` while it is
+// stopped at a blocking manual job, and reporting that as a skip would let a
+// blocked pipeline read green. Job-level manual states never reach this case -
+// gitlabJob.bucket splits them by allow_failure first - so this mapping serves
+// the pipeline-status reading, not the job reader.
 func gitlabStatusBucket(state string) scm.CheckBucket {
 	switch strings.ToLower(strings.TrimSpace(state)) {
 	case "success":
@@ -1455,9 +1532,7 @@ func gitlabStatusBucket(state string) scm.CheckBucket {
 		return scm.CheckBucketCancel
 	case "skipped":
 		return scm.CheckBucketSkip
-	case "manual":
-		return scm.CheckBucketSkip
-	case "pending", "running", "created", "waiting_for_resource", "preparing", "scheduled":
+	case "manual", "pending", "running", "created", "waiting_for_resource", "preparing", "scheduled":
 		return scm.CheckBucketPending
 	default:
 		return ""

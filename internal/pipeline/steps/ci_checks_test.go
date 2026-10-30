@@ -1,12 +1,60 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/scm/plugin"
 )
+
+type observedCheckHost struct {
+	scm.Host
+	head string
+	err  error
+}
+
+func (h observedCheckHost) GetChecks(_ context.Context, pr *scm.PR) ([]scm.Check, error) {
+	pr.ObservedHeadSHA = h.head
+	return []scm.Check{{Name: "build", Bucket: scm.CheckBucketPass}}, h.err
+}
+
+func TestGetCIChecksBindsSuccessfulObservationsAndPreservesProtocolErrors(t *testing.T) {
+	t.Parallel()
+	readErr := errors.New("check discovery failed")
+	for _, tc := range []struct {
+		name, requested, observed string
+		err                       error
+		wantMoved, wantHeadError  bool
+	}{
+		{name: "same head", requested: "head-a", observed: "head-a"},
+		{name: "unreported head", requested: "head-a"},
+		{name: "advanced head", requested: "head-a", observed: "head-b", wantMoved: true, wantHeadError: true},
+		{name: "older head", requested: "head-b", observed: "head-a", wantMoved: true, wantHeadError: true},
+		{name: "moved before read failure", requested: "head-a", observed: "head-b", err: readErr, wantMoved: true, wantHeadError: true},
+		{name: "same head read failure", requested: "head-a", observed: "head-a", err: readErr},
+		{name: "provider head refusal", requested: "head-a", err: scm.ErrHeadChanged, wantMoved: true, wantHeadError: true},
+		{name: "moved with protocol failure", requested: "head-a", observed: "head-b", err: plugin.ErrProtocol, wantMoved: true},
+		{name: "moved with plugin timeout", requested: "head-a", observed: "head-b", err: errors.Join(plugin.ErrProtocol, plugin.ErrTimeout), wantMoved: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pr := &scm.PR{HeadSHA: tc.requested}
+			_, observed, moved, err := getCIChecks(context.Background(), observedCheckHost{head: tc.observed, err: tc.err}, pr)
+			if observed != tc.observed || moved != tc.wantMoved || errors.Is(err, scm.ErrHeadChanged) != tc.wantHeadError {
+				t.Fatalf("observation = (%q, %t, %v)", observed, moved, err)
+			}
+			if !tc.wantHeadError && err != tc.err {
+				t.Fatalf("provider error changed: got %v, want %v", err, tc.err)
+			}
+			if pr.HeadSHA != tc.requested {
+				t.Fatal("check discovery changed the requested head")
+			}
+		})
+	}
+}
 
 func TestAllChecksPassedFailsClosed(t *testing.T) {
 	t.Parallel()
@@ -60,7 +108,7 @@ func TestCITimeoutFindingsPreserveSameNamedCheckIdentity(t *testing.T) {
 func TestPendingCheckMatchesLastFixed_SpecialCheckNames(t *testing.T) {
 	t.Parallel()
 
-	lastFixedChecks := encodeLastFixedChecks([]scm.CheckTarget{{Name: "lint,unit"}, {Name: "deploy+conflict"}}, true)
+	lastFixedChecks := encodeLastFixedChecks([]scm.CheckTarget{{Name: "lint,unit"}, {Name: "deploy+conflict"}}, true, "base-1")
 	checks := []scm.Check{
 		{Name: "lint,unit", Bucket: "pending"},
 	}
@@ -83,11 +131,11 @@ func TestLastFixedTrackingUsesProviderIdentityForSameNamedChecks(t *testing.T) {
 	code := scm.Check{Name: "build", ProviderID: "github-check-run:41", Bucket: scm.CheckBucketFail, CompletedAt: completed}
 	bot := scm.Check{Name: "build", ProviderID: "github-check-run:42", Bucket: scm.CheckBucketFail, CompletedAt: completed}
 	step := &CIStep{
-		lastFixedChecks:      encodeLastFixedChecks([]scm.CheckTarget{{Name: code.Name, ProviderID: code.ProviderID}}, false),
+		lastFixedChecks:      encodeLastFixedChecks([]scm.CheckTarget{{Name: code.Name, ProviderID: code.ProviderID}}, false, ""),
 		lastFixedCompletedAt: terminalFailureCompletionTimes([]scm.Check{code, bot}),
 	}
 
-	if step.lastRepairStillUnverified([]scm.Check{bot}, false) {
+	if step.lastRepairStillUnverified([]scm.Check{bot}, false, "") {
 		t.Fatal("same-named bot failure must not stand in for the repaired check")
 	}
 	bot.Bucket = scm.CheckBucketPending
@@ -170,5 +218,29 @@ func TestTerminalFailureCompletionTimesStillCoverFailingChecks(t *testing.T) {
 	})
 	if quiet != nil {
 		t.Fatalf("completion times = %v, want nothing recorded for non-failures", quiet)
+	}
+}
+
+func TestLastRepairConflictBaseCompatibility(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		key      string
+		base     string
+		conflict bool
+		want     bool
+	}{
+		{name: "legacy", key: `{"mergeConflict":true}`, base: "new-base", conflict: true, want: true},
+		{name: "legacy_resolved", key: `{"mergeConflict":true}`, base: "new-base"},
+		{name: "same_base", key: encodeLastFixedChecks(nil, true, "base"), base: "base", conflict: true, want: true},
+		{name: "new_base", key: encodeLastFixedChecks(nil, true, "base"), base: "new-base", conflict: true},
+		{name: "unresolved_base", key: encodeLastFixedChecks(nil, true, "base"), conflict: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step := &CIStep{lastFixedChecks: tc.key}
+			if got := step.lastRepairStillUnverified(nil, tc.conflict, tc.base); got != tc.want {
+				t.Fatalf("lastRepairStillUnverified() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

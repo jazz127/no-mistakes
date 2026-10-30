@@ -66,6 +66,9 @@ func TestReviewStep_ContinuationCannotCertifySourceChangedDuringItsTurn(t *testi
 }
 
 func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
+	// Bound hangs while allowing real Git subprocesses time on contended Windows runners.
+	const waitTimeout = 30 * time.Second
+
 	dir, base, _ := twoFileRepo(t)
 	if err := os.WriteFile(filepath.Join(dir, "feature3.txt"), []byte("third changed file\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -165,11 +168,11 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 		cancel(pipeline.ErrDaemonShutdown)
 		select {
 		case <-finished:
-		case <-time.After(5 * time.Second):
+		case <-time.After(waitTimeout):
 			t.Error("disposable review executor did not exit")
 		}
 	})
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(waitTimeout)
 	var binding *ipc.CoverageBinding
 	for time.Now().Before(deadline) {
 		steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
@@ -225,7 +228,6 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 		done = make(chan error, 1)
 		finished = make(chan struct{})
 		go func() { defer close(finished); done <- executor.Resume(ctx, sctx.Run, sctx.Repo, dir) }()
-		deadline = time.Now().Add(5 * time.Second)
 	}
 	expectRefusal := false
 	expectScopePark := mode == "scope change" || mode == "base change" || mode == "record:scope"
@@ -297,6 +299,7 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 		}
 		expectRefusal = mode != "record:scope"
 	}
+	deadline = time.Now().Add(waitTimeout)
 	for {
 		_, err := executor.RespondWithOverrides(types.StepReview, types.ActionCompleteCoverage, nil, nil, nil, nil, "", pipeline.ResponseOptions{Coverage: binding})
 		if expectRefusal && err != nil && !strings.Contains(err.Error(), "no step awaiting approval") {
@@ -318,7 +321,7 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	deadline = time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(waitTimeout)
 	for time.Now().Before(deadline) {
 		steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
 		if err != nil {

@@ -556,7 +556,7 @@ func (s *CIStep) rerunTransientChecks(sctx *pipeline.StepContext, host scm.Host,
 	}
 	if published != sctx.Run.HeadSHA {
 		sctx.Log(fmt.Sprintf("published branch head moved (expected %s, observed %s); not re-running checks", shortSHA(sctx.Run.HeadSHA), shortSHA(published)))
-		return false, ciRerunHeadMismatchOutcome(sctx.Run.HeadSHA, published)
+		return false, ciPublishedHeadMismatchOutcome(sctx.Run.HeadSHA, published)
 	}
 
 	issued := false
@@ -582,6 +582,15 @@ func (s *CIStep) rerunTransientChecks(sctx *pipeline.StepContext, host scm.Host,
 	return issued, nil
 }
 
+// publishedHeadBoundedContext returns a copy of sctx whose context ends after
+// publishedHeadResolveWindow, so a stalled remote read cannot block a step.
+func publishedHeadBoundedContext(sctx *pipeline.StepContext) (*pipeline.StepContext, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(sctx.Ctx, publishedHeadResolveWindow)
+	bounded := *sctx
+	bounded.Ctx = ctx
+	return &bounded, cancel
+}
+
 // publishedBranchHead returns the commit the run's branch points at on the push
 // target - the commit the provider's checks actually ran on. A branch that is
 // missing there is an error like any other unreadable remote, never a SHA the
@@ -594,11 +603,9 @@ func (s *CIStep) rerunTransientChecks(sctx *pipeline.StepContext, host scm.Host,
 // status API stays healthy would otherwise defer timeout detection indefinitely.
 func publishedBranchHead(sctx *pipeline.StepContext) (string, error) {
 	ref := normalizedBranchRef(sctx.Run.Branch)
-	ctx, cancel := context.WithTimeout(sctx.Ctx, defaultPublishedHeadResolveWindow)
+	bounded, cancel := publishedHeadBoundedContext(sctx)
 	defer cancel()
-	bounded := *sctx
-	bounded.Ctx = ctx
-	out, err := stepGitRun(&bounded, "ls-remote", resolvePushURL(sctx), ref)
+	out, err := stepGitRunTree(bounded, "ls-remote", resolvePushURL(sctx), ref)
 	if err != nil {
 		return "", err
 	}
@@ -765,12 +772,12 @@ func unresolvedTransientDescription(name string, reruns int, preRunFailure bool)
 	return fmt.Sprintf("CI check cancelled without a verdict: %s - the provider cancelled it rather than reporting a job failure, and no rerun is outstanding to replace that result, so it needs a decision rather than a code fix", name)
 }
 
-func ciRerunHeadMismatchOutcome(expected, observed string) *pipeline.StepOutcome {
+func ciPublishedHeadMismatchOutcome(expected, observed string) *pipeline.StepOutcome {
 	findings := Findings{
 		Summary: "published branch head no longer matches the commit this run delivered",
 		Items: []Finding{{
 			Severity:    "warning",
-			Description: fmt.Sprintf("CI checks could not be re-run: expected head %s, observed %s on the push target", expected, observed),
+			Description: fmt.Sprintf("CI checks cannot certify this run: expected head %s, observed %s on the push target", expected, observed),
 			Action:      types.ActionAskUser,
 		}},
 	}

@@ -149,7 +149,11 @@ func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, str
 			forkRepo = github.RepoSlug(sctx.Repo.ForkURL)
 		}
 		draft := githubDraftPullRequestsEnabled(sctx)
-		return github.NewWithFork(cmdFactory, func() bool { return stepCLIAvailable(sctx, provider) }, host, repo, forkRepo, draft), ""
+		gh := github.NewWithFork(cmdFactory, func() bool { return stepCLIAvailable(sctx, provider) }, host, repo, forkRepo, draft)
+		if sctx.Config != nil {
+			gh.WithRequiredReviews(sctx.Config.CI.RequiredReviews)
+		}
+		return gh, ""
 	case scm.ProviderGitLab:
 		if sctx.Repo.ForkURL != "" {
 			// Fork MR routing for GitLab is intentionally not half-wired.

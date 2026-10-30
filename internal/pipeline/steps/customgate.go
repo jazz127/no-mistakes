@@ -77,13 +77,13 @@ Rules:
 - Do not weaken, disable, or narrow the gate itself to make it pass.
 - Re-run or re-check the gate's own requirement above before finishing, and nothing broader.
 - Return JSON with a single "summary" field when you are done.
-- The summary must be one concise sentence fragment suitable for a git commit subject.
-- Keep the summary under 10 words.%s`,
+%s%s`,
 		s.Gate.Name,
 		sctx.Run.Branch,
 		baseSHA,
 		sctx.Run.HeadSHA,
 		requirement,
+		fixSummaryRules(sctx, s.Name()),
 		executionContextPromptSection(sctx.WorkDir)+roundHistoryPromptSection(sctx)+userIntentPromptSection(sctx),
 	)
 	if sctx.PreviousFindings != "" {

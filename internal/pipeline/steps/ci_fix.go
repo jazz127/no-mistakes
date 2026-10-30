@@ -7,17 +7,22 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/testguidance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 var errCIAttestationUnsettled = errors.New("CI repair attestation is unsettled")
+
+var errCIFixAgentCrash = errors.New("CI fix agent crashed")
 
 // errAttestationWriteFailed marks a failure specifically inside
 // attestHeadBeforePush (PR discovery or the attestation write itself), as
@@ -72,36 +77,66 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	if err != nil {
 		return nil, fmt.Errorf("parse CI fix targets: %w", err)
 	}
+	targets, err = ciPendingRepairTargets(sctx, targets)
+	if err != nil {
+		return nil, err
+	}
 	if targets.empty() {
 		sctx.Log("fix requested with no CI findings to repair, resuming monitoring...")
 		return nil, nil
 	}
-	if len(targets.Checks) > 0 && s.observedCompletedAt == nil {
-		expectedHeadSHA, err := stepGitHeadSHA(sctx)
+	var failingFindings Findings
+	for _, finding := range targets.Findings.Items {
+		if finding.Category == types.FindingCategoryCICheck {
+			failingFindings.Items = append(failingFindings.Items, finding)
+		}
+	}
+	failingTargets := ciFixTargetsFromFindings(failingFindings)
+	if len(failingTargets.Checks) > 0 {
+		expectedHeadSHA, err := ciRepairCheckHead(sctx)
 		if err != nil {
 			return nil, fmt.Errorf("resolve head before snapshotting selected CI checks: %w", err)
 		}
 		snapshotPR := *pr
 		snapshotPR.HeadSHA = expectedHeadSHA
-		checks, err := host.GetChecks(sctx.Ctx, &snapshotPR)
-		if err != nil {
+		checks, _, moved, err := getCIChecks(sctx.Ctx, host, &snapshotPR)
+		switch {
+		case moved && !pluginContractBroken(err):
+			sctx.Log("selected CI checks are stale; waiting for current checks before repair")
+			failingTargets.Checks = nil
+		case err != nil:
 			return nil, fmt.Errorf("snapshot selected CI checks before repair: %w", err)
+		default:
+			for _, target := range failingTargets.Checks {
+				// Only a fresh failure is repairable. A selected check that
+				// was re-run and then cancelled has no failure left for the
+				// fixer; cancellations go to the ask-user path instead.
+				if !checkTargetStillFailing(checks, target) {
+					sctx.Log("selected CI checks are missing or no longer failing; waiting for current CI observation")
+					failingTargets.Checks = nil
+					break
+				}
+			}
+			if len(failingTargets.Checks) > 0 {
+				s.observedCompletedAt = terminalFailureCompletionTimes(checks)
+			}
 		}
-		if snapshotPR.HeadSHA != expectedHeadSHA {
-			return nil, fmt.Errorf("snapshot selected CI checks before repair: %w", scm.ErrHeadChanged)
+		if len(failingTargets.Checks) == 0 {
+			targets = targets.withoutFailingChecks()
+			if targets.empty() {
+				return nil, nil
+			}
 		}
-		s.observedCompletedAt = terminalFailureCompletionTimes(checks)
 	}
 	issueDesc := targets.description()
 	sctx.Log(fmt.Sprintf("repairing: %s...", issueDesc))
 	previousHeadSHA := sctx.Run.HeadSHA
-	fixKey := encodeLastFixedChecks(targets.Checks, targets.MergeConflict)
 	fixCompletedAt := completionTimesForTargets(s.observedCompletedAt, targets.Checks)
 	repair, err := s.autoFixCI(sctx, host, pr, targets)
 	if outcome := pipeline.ProtectedPathOutcome(err); outcome != nil {
 		return ciTerminalRepairOutcome(outcome, targets.Findings, sctx.DeferredFindings), nil
 	}
-	if outcome := s.ciFixAgentBudgetOutcome(sctx, issueDesc, err); outcome != nil {
+	if outcome := s.ciFixAgentBudgetOutcome(sctx, pr, issueDesc, err); outcome != nil {
 		return ciTerminalRepairOutcome(outcome, targets.Findings, sctx.DeferredFindings), nil
 	}
 	if err != nil && pluginContractBroken(err) {
@@ -122,11 +157,29 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 		// An ordinary fix failure is cheap to repeat and often works the next
 		// time: the next settled observation re-emits the findings and the
 		// executor retries while auto_fix.ci allows.
+		if errors.Is(err, errCIFixAgentCrash) {
+			s.fixAgentCrashes++
+			cause := intent.RedactSecrets(safeurl.RedactText(err.Error()))
+			cause = strings.Map(func(r rune) rune {
+				if unicode.IsControl(r) {
+					return ' '
+				}
+				return r
+			}, cause)
+			cause = strings.Join(strings.Fields(cause), " ")
+			// Error text can contain a whole agent transcript. Keep the
+			// published finding below the IPC frame budget, even for UTF-8.
+			runes := []rune(cause)
+			if len(runes) > 256 {
+				cause = string(runes[:256]) + "..."
+			}
+			s.lastFixAgentCrash = cause
+		}
 		sctx.Log(fmt.Sprintf("warning: CI fix failed: %v", err))
 		return nil, nil
 	}
 	if repair.HeadAdvanced || sctx.Run.HeadSHA != previousHeadSHA {
-		s.lastFixedChecks = fixKey
+		s.lastFixedChecks = encodeLastFixedChecks(targets.Checks, targets.MergeConflict, repair.ConflictBaseSHA)
 		s.lastFixedCompletedAt = fixCompletedAt
 		s.pendingFixSummary = repair.Summary
 		s.pendingRepairPublish = true
@@ -169,6 +222,10 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 // The result reports whether the recorded head advanced and whether the repair
 // must revalidate; a zero result means the agent produced no changes.
 func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, targets ciFixTargets) (ciRepairResult, error) {
+	targets, err := ciPendingRepairTargets(sctx, targets)
+	if err != nil || targets.empty() {
+		return ciRepairResult{}, err
+	}
 	ctx := sctx.Ctx
 	failingNames := targets.checkNames()
 	mergeConflict := targets.MergeConflict
@@ -185,20 +242,29 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	if err != nil {
 		return ciRepairResult{}, err
 	}
-	rebaseBaseSHA := resolveRunDefaultBranchTipSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
+	rebaseBaseSHA, rebaseBaseResolved := resolveRunDefaultBranchTip(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
+	conflictBaseSHA := ""
+	if mergeConflict && rebaseBaseResolved {
+		conflictBaseSHA = rebaseBaseSHA
+	}
 	promptBaseSHA := baseSHA
 	if rebase {
 		promptBaseSHA = rebaseBaseSHA
 	}
 	if rebase && mergesMovedBase(sctx) {
 		// Under rebase.strategy: merge a conflict or behind-base repair follows the
-		// rebase step integrates a moved base: the pipeline merges the base
+		// way the rebase step integrates a moved base: the pipeline merges the base
 		// into the reviewed head itself, through mergeWithAgent's proven shape,
 		// instead of asking the fixer to rebase. The repaired head then
 		// descends from the reviewed, already-published head, so
 		// recordRepair's continuity proof holds and publication is a plain
 		// fast-forward rather than a rewrite the push guards must refuse.
-		if err := mergeWithAgent(ctx, sctx, rebaseBaseSHA); err != nil {
+		mergeContext := *sctx
+		mergeContext.PreviousFindings, err = types.MarshalFindingsJSON(targets.Findings)
+		if err != nil {
+			return ciRepairResult{}, err
+		}
+		if err := mergeWithAgent(ctx, &mergeContext, rebaseBaseSHA); err != nil {
 			return ciRepairResult{}, fmt.Errorf("merge base branch %q: %w", baseBranch, err)
 		}
 		mergeConflict = false
@@ -208,7 +274,8 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 		if targets.empty() {
 			// mergeWithAgent already committed the merge; no fixer result is
 			// available to attribute a producer for any retained changes.
-			repair, err := s.commitRepair(sctx, "merge "+baseBranch+" into branch", nil)
+			repair, err := s.commitRepairOnBase(sctx, "merge "+baseBranch+" into branch", nil, rebaseBaseSHA)
+			repair.ConflictBaseSHA = conflictBaseSHA
 			if err == nil && repair.HeadAdvanced {
 				repair.Summary = "merged " + baseBranch + " into branch"
 			}
@@ -218,8 +285,12 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 
 	const maxLogBytes = 32 * 1024
 	var logOutput string
-	if host.Capabilities().FailedCheckLogs {
-		logOutput, err = fetchCILogOutput(ctx, host, pr, sctx.Run.Branch, sctx.Run.HeadSHA, targets.Checks, maxLogBytes)
+	if host.Capabilities().FailedCheckLogs && len(targets.Checks) > 0 {
+		checkHeadSHA, err := ciRepairCheckHead(sctx)
+		if err != nil {
+			return ciRepairResult{}, err
+		}
+		logOutput, err = fetchCILogOutput(ctx, host, pr, sctx.Run.Branch, checkHeadSHA, targets.Checks, maxLogBytes)
 		if err != nil {
 			return ciRepairResult{}, err
 		}
@@ -301,6 +372,9 @@ CI logs:
 		OnChunk:    sctx.LogChunk,
 	})
 	if err != nil {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, pipeline.ErrAgentTimeout) {
+			err = fmt.Errorf("%w: %w", errCIFixAgentCrash, err)
+		}
 		return ciRepairResult{}, fmt.Errorf("agent CI fix: %w", err)
 	}
 
@@ -312,7 +386,8 @@ CI logs:
 		s.replayBase = rebaseBaseSHA
 		defer func() { s.replayBase = "" }()
 	}
-	repair, err := s.commitRepair(sctx, conclusion.Summary, result)
+	repair, err := s.commitRepairOnBase(sctx, conclusion.Summary, result, rebaseBaseSHA)
+	repair.ConflictBaseSHA = conflictBaseSHA
 	var refusal *pipeline.ProtectedPathError
 	if errors.As(err, &refusal) {
 		head, recordErr := stepGitHeadSHA(sctx)
@@ -333,6 +408,45 @@ CI logs:
 		repair.Summary = conclusion.Summary
 	}
 	return repair, nil
+}
+
+func ciPendingRepairTargets(sctx *pipeline.StepContext, targets ciFixTargets) (ciFixTargets, error) {
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil || run == nil {
+		return targets, err
+	}
+	pending, err := sctx.DB.RunTestRestartPending(sctx.Run.ID)
+	if err != nil {
+		return ciFixTargets{}, err
+	}
+	if pending {
+		targets = targets.withoutFailingChecks()
+	}
+	return targets, nil
+}
+
+func ciRepairCheckHead(sctx *pipeline.StepContext) (string, error) {
+	head, err := runOwnedPublishedHead(sctx)
+	if err != nil {
+		return "", err
+	}
+	if head == "" {
+		head = sctx.Run.HeadSHA
+	}
+	localHead, err := stepGitHeadSHA(sctx)
+	if err != nil {
+		return "", err
+	}
+	if localHead != head {
+		publishedHead, err := publishedBranchHead(sctx)
+		if err != nil {
+			return "", err
+		}
+		if publishedHead == localHead {
+			return localHead, nil
+		}
+	}
+	return head, nil
 }
 
 // fetchCILogOutput returns the selected checks' log evidence. A failed
@@ -512,7 +626,7 @@ func ciSelectedFindingsPrompt(findings Findings) string {
 	if err != nil {
 		return ""
 	}
-	section := "\n\nFindings to address (selected for this fix round, with any user instructions):\n" + sanitizedPreviousFindingsForPrompt(encoded)
+	section := "\n\nFindings to address (selected for this fix round, with any user or driver instructions):\n" + sanitizedPreviousFindingsForPrompt(encoded)
 	if len(external) == 0 {
 		return section
 	}
@@ -552,7 +666,7 @@ func ciSelectedFindingsPrompt(findings Findings) string {
 	return section + prefix + string(raw) + suffix
 }
 
-func (s *CIStep) ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, issueDesc string, err error) *pipeline.StepOutcome {
+func (s *CIStep) ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, pr *scm.PR, issueDesc string, err error) *pipeline.StepOutcome {
 	if err == nil || !errors.Is(err, pipeline.ErrAgentTimeout) {
 		return nil
 	}
@@ -563,7 +677,12 @@ func (s *CIStep) ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, issueDesc s
 	case rebaseInProgress(sctx.Ctx, sctx.WorkDir) || mergeInProgress(sctx.Ctx, sctx.WorkDir):
 		leftover = append(leftover, fmt.Sprintf("The timed-out agent left an unfinished rebase or merge in the run worktree at %s; its partial HEAD is not recorded.", sctx.WorkDir))
 	case headErr == nil && head != "" && head != sctx.Run.HeadSHA:
-		if _, recErr := s.recordLocalRepair(sctx, head); recErr != nil {
+		normalized, recErr := ciRetainedRepairHead(sctx, pr)
+		if recErr == nil {
+			head = normalized
+			_, recErr = s.recordLocalRepair(sctx, head)
+		}
+		if recErr != nil {
 			sctx.Log(fmt.Sprintf("warning: could not record timed-out CI repair head %s: %v", head, recErr))
 			leftover = append(leftover, fmt.Sprintf("The timed-out agent left a committed head at %s in the run worktree.", shortObjectID(head)))
 		} else {
@@ -601,6 +720,7 @@ type ciRepairResult struct {
 	// ReviewCarried is true when a revalidating repair kept the run's review
 	// approval as a proven pure replay, so revalidation starts at Test.
 	ReviewCarried      bool
+	ConflictBaseSHA    string
 	NoCodeChangeNeeded bool
 	Summary            string
 }
@@ -618,15 +738,18 @@ func (s *CIStep) commitAndPush(sctx *pipeline.StepContext) (ciRepairResult, erro
 	return s.commitRepair(sctx, "", nil)
 }
 
-func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairResult, error) {
+func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext, baseBranch string) (ciRepairResult, error) {
 	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
 		return ciRepairResult{}, err
 	}
 	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
 	sctx.Log("retrying retained CI repair after protected-path refusal")
+	if err := fetchRunUpstreamBranch(sctx.Ctx, sctx, baseBranch); err != nil {
+		return ciRepairResult{}, err
+	}
 	// The retained changes outlived the invocation that made them, so no
 	// producer is known here and the commit carries no trailers.
-	repair, err := s.commitRepair(sctx, "", nil)
+	repair, err := s.commitRepairOnBase(sctx, "", nil, "refs/remotes/origin/"+baseBranch)
 	if err != nil || repair.HeadAdvanced {
 		return repair, err
 	}
@@ -638,6 +761,20 @@ func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairR
 }
 
 func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, producer *agent.Result) (ciRepairResult, error) {
+	base := ""
+	if mergesMovedBase(sctx) {
+		base = "refs/remotes/origin/" + effectivePRBaseBranch(sctx)
+	}
+	return s.commitRepairOnBase(sctx, summary, producer, base)
+}
+
+func (s *CIStep) commitRepairOnBase(sctx *pipeline.StepContext, summary string, producer *agent.Result, base string) (ciRepairResult, error) {
+	render := func() (string, error) {
+		return renderFixCommitMessage(sctx, types.StepCI, summary, "repair failing checks", producer)
+	}
+	if err := conformAgentCommitsOnBase(sctx, types.StepCI, base, render); err != nil {
+		return ciRepairResult{}, err
+	}
 	status, err := stepGitRun(sctx, "status", "--porcelain")
 	if err != nil {
 		return ciRepairResult{}, fmt.Errorf("check CI changes: %w", err)
@@ -651,16 +788,9 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, produc
 		return ciRepairResult{}, nil
 	}
 
-	if summary == "" {
-		summary = "repair failing checks"
-	}
-	message, err := sctx.Config.Commit.RenderFixMessageForBranch(types.StepCI, summary, sctx.Run.Branch)
+	message, err := render()
 	if err != nil {
-		return ciRepairResult{}, fmt.Errorf("render CI repair commit message: %w", err)
-	}
-	message, err = withCommitTrailers(sctx, message, producer)
-	if err != nil {
-		return ciRepairResult{}, fmt.Errorf("render CI repair commit trailers: %w", err)
+		return ciRepairResult{}, err
 	}
 	if err := stagePipelineChanges(sctx); err != nil {
 		return ciRepairResult{}, fmt.Errorf("stage CI changes: %w", err)
@@ -691,6 +821,50 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, produc
 	}
 
 	return s.recordRepair(sctx, headSHA)
+}
+
+func (s *CIStep) reconcileRetainedRepair(sctx *pipeline.StepContext, pr *scm.PR) (ciRepairResult, error) {
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil || run == nil {
+		return ciRepairResult{}, err
+	}
+	pending, err := sctx.DB.RunTestRestartPending(sctx.Run.ID)
+	if err != nil {
+		return ciRepairResult{}, err
+	}
+	head, err := stepGitHeadSHA(sctx)
+	if err != nil {
+		return ciRepairResult{}, err
+	}
+	if !pending && !ciHeadAwaitsRecording(sctx, head) {
+		return ciRepairResult{}, nil
+	}
+	if rebaseInProgress(sctx.Ctx, sctx.WorkDir) || mergeInProgress(sctx.Ctx, sctx.WorkDir) {
+		return ciRepairResult{}, fmt.Errorf("retained CI repair has an unfinished git integration")
+	}
+	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+		return ciRepairResult{}, err
+	}
+	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
+	head, err = ciRetainedRepairHead(sctx, pr)
+	if err != nil {
+		return ciRepairResult{}, fmt.Errorf("normalize retained CI repair: %w", err)
+	}
+	return s.recordRepair(sctx, head)
+}
+
+func ciRetainedRepairHead(sctx *pipeline.StepContext, pr *scm.PR) (string, error) {
+	baseBranch := effectivePRBaseBranch(sctx)
+	if pr != nil && strings.TrimSpace(pr.BaseBranch) != "" {
+		baseBranch = strings.TrimSpace(pr.BaseBranch)
+	}
+	render := func() (string, error) {
+		return renderFixCommitMessage(sctx, types.StepCI, "", "repair failing checks", nil)
+	}
+	if err := conformAgentCommitsOnBase(sctx, types.StepCI, "refs/remotes/origin/"+baseBranch, render); err != nil {
+		return "", err
+	}
+	return stepGitHeadSHA(sctx)
 }
 
 // ciHeadAwaitsRecording reports whether a fix round that committed nothing

@@ -20,7 +20,8 @@ import "strings"
 const (
 	// ChecksPassedMsg is logged when every CI check has passed but the PR is
 	// not yet merged or closed, so the monitor keeps watching subject to its
-	// configured timeout. This is the default behaviour.
+	// configured timeout unless an operator explicitly hands it off. This is
+	// the default behaviour.
 	ChecksPassedMsg = "all CI checks passed - still monitoring until merged or closed"
 	// ChecksPassedCompleteMsg is the green verdict under the opt-in
 	// ci.release_after_checks_pass: every CI check has passed, so the step
@@ -32,7 +33,8 @@ const (
 	// declares `no_ci: true` and the forge reports zero checks. The message
 	// names the positive declaration so agents and operators can inspect the
 	// evidence rather than treating every empty forge response as green. An
-	// empty check list WITHOUT that declaration must never produce this line.
+	// empty check list WITHOUT that declaration must never produce this line;
+	// the resulting monitor can still be explicitly handed off.
 	NoChecksPassedMsg = "repository declares no CI (no_ci: true) - treating as all checks passed - still monitoring until merged or closed"
 	// NoChecksPassedCompleteMsg is the release form of NoChecksPassedMsg: the
 	// declaration is the positive evidence the empty check list is green, and
@@ -50,6 +52,12 @@ const (
 	// running checks, because the only thing that clears it happens outside
 	// the pipeline.
 	ChecksAwaitingApprovalMsg = "CI workflows are held awaiting maintainer approval - no jobs have run, waiting..."
+	// ChecksAwaitingManualJobMsg is logged when the provider is holding the
+	// pipeline on a blocking manual job - GitLab stops at the job's stage
+	// until a person runs it. Nothing the repository does clears it,
+	// so like the maintainer-approval hold it is named instead of being
+	// reported as checks that are running.
+	ChecksAwaitingManualJobMsg = "CI is held on a blocking manual job awaiting a person to run it, waiting..."
 	// BehindBaseMsg is the one poll a green PR the forge reports BEHIND
 	// waits for its base to stop moving before the monitor rebases it.
 	BehindBaseMsg = "all CI checks passed but the PR is behind a base that requires up-to-date branches, waiting for the base to settle before rebasing..."
@@ -122,6 +130,7 @@ func ParseActivity(logs []string) Activity {
 		case strings.Contains(line, "issues detected"),
 			strings.Contains(line, "CI checks running"),
 			line == ChecksAwaitingApprovalMsg,
+			line == ChecksAwaitingManualJobMsg,
 			strings.HasPrefix(line, ChecksHeadWaitingPrefix),
 			line == BehindBaseMsg,
 			strings.Contains(line, "mergeable state still pending"),

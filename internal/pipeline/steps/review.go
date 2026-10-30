@@ -156,9 +156,9 @@ Rules:
 - After applying the fixes and before verification, re-trace for each finding the concrete failing sequence it describes through the code as it now is, and trace the ordinary successful path through every function you changed, including each of its callers. Remove any alias, branch, parameter, or helper your fix made unreachable. A fix that makes the reported sequence pass while breaking the ordinary path, a caller's assumption, or a sibling site is a regression the next review will report.
 - After all fixes are applied, run one focused verification limited to the changed area (the specific package, file, or test you touched) at the end of the fix round to confirm the fixes hold.
 - Do NOT run the complete repository test suite or lint suite during this fix round. The pipeline has dedicated test and lint steps after review that are the authoritative test and lint gates; their coverage may itself be focused on the changed area when the repository has no configured test or lint commands.
-- Return JSON with a single "summary" field when you are done.
-- The summary must be one concise sentence fragment suitable for a git commit subject.
-- Keep the summary under 10 words.%s
+- If the tool needed for that verification is missing, still apply every fix you intended and skip the unavailable verification. Never make fewer edits, or none, because verification is unavailable.
+- Return JSON with a "summary" field when you are done. Add a "verification_blocked" field, naming the missing tool and why verification could not run, only when the verification you intended could not run; otherwise omit it.
+%s%s
 
 Previous review findings to address:
 %s`,
@@ -168,6 +168,7 @@ Previous review findings to address:
 			reviewScope,
 			baseBranch,
 			ignorePatterns,
+			fixSummaryRules(sctx, types.StepReview),
 			historySection,
 			previousFindings,
 		)
@@ -175,15 +176,16 @@ Previous review findings to address:
 		// the step parent for synchronous preparation and commit work, so the
 		// independent rereviewer cannot inherit its spent deadline.
 		summary, err := s.executeReviewFixWithTimeout(sctx, s.Name(), fixExecutionOptions{
-			RequirePreviousFindings: true,
-			MissingFindingsError:    "review fix requires previous review findings",
-			LogMessage:              "asking agent to fix identified issues...",
-			Prompt:                  fixPrompt,
-			ErrorPrefix:             "agent fix",
-			FallbackSummary:         "address review findings",
-			SessionRole:             pipeline.SessionRoleFixer,
-			Purpose:                 "review-fix",
-			Workload:                workload,
+			RequirePreviousFindings:   true,
+			MissingFindingsError:      "review fix requires previous review findings",
+			LogMessage:                "asking agent to fix identified issues...",
+			Prompt:                    fixPrompt,
+			ErrorPrefix:               "agent fix",
+			FallbackSummary:           "address review findings",
+			SessionRole:               pipeline.SessionRoleFixer,
+			Purpose:                   "review-fix",
+			Workload:                  workload,
+			ReportBlockedVerification: true,
 		})
 		if err != nil {
 			return nil, err
@@ -192,10 +194,8 @@ Previous review findings to address:
 	}
 	reviewTargetSHA := sctx.Run.HeadSHA
 
-	// The changed-file set is read once and viewed two ways on purpose: the
-	// ignore-filtered subset decides whether there is anything to review, while
-	// trusted path instructions are selected against the complete set (see
-	// matchPathInstructions).
+	// Required instruction-covered paths join the review scope before the empty
+	// scope shortcut, so pushed ignores cannot waive a trusted review obligation.
 	var args []string
 	if sctx.Fixing {
 		args = []string{"diff", "--name-only", "-z", "--no-renames", baseSHA}
@@ -208,7 +208,7 @@ Previous review findings to address:
 	}
 	changed := changedPathList(changedFiles)
 
-	reviewable := reviewablePaths(changed, sctx.Config.IgnorePatterns)
+	reviewable, pathInstructions := reviewPathsAndInstructions(changed, sctx.Config, sctx.Log)
 	var retained *Findings
 	if sctx.CoverageContinuation != nil {
 		prior, err := retainedCoverageForReview(sctx, baseSHA, reviewTargetSHA, reviewable)
@@ -261,21 +261,6 @@ Previous review findings to address:
 		return nil, err
 	}
 	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + planSection + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction
-
-	// Path-scoped review guidance, taken from the operator's global config and
-	// from the trusted default-branch config copy (regardless of
-	// allow_repo_commands), so a pushed branch cannot steer the reviewer that
-	// gates it. Selection runs against the complete changed-file set, never the
-	// ignore-filtered one, so a pushed ignore_patterns entry cannot suppress a
-	// rule. Only blocks whose glob matches a changed path are appended, so a
-	// run with none configured - or none relevant to this diff - gets the
-	// prompt above unchanged.
-	pathInstructions := ""
-	for _, source := range sctx.Config.Review.PathInstructionSources() {
-		matches := matchPathInstructions(changed, source.Entries)
-		logPathInstructions(sctx.Log, source.Label, matches)
-		pathInstructions += reviewPathInstructionsSection(source.Heading, matches)
-	}
 
 	// The authorization/privacy obligation below specializes the existing
 	// concrete-state trace only when changed behavior crosses a potentially
@@ -616,7 +601,7 @@ func coveragePathLine(p string) string {
 // file the reviewer did not examine still must not be listed.
 func reviewCoverageSection(paths []string) string {
 	var b strings.Builder
-	b.WriteString("\nChanged files this review is held to (computed by the pipeline from the branch diff, minus ignored paths):\n")
+	b.WriteString("\nChanged files this review is held to (computed by the pipeline from the branch diff, minus ignored paths, plus instruction-covered paths unless the trusted default branch also ignores them):\n")
 	for _, p := range paths {
 		fmt.Fprintf(&b, "- %s\n", coveragePathLine(p))
 	}
@@ -948,6 +933,7 @@ func sanitizedPreviousFindingsForPrompt(raw string) string {
 		findings.Items[i].Description = sanitizePromptMultilineText(findings.Items[i].Description)
 		findings.Items[i].Source = sanitizePromptText(findings.Items[i].Source)
 		findings.Items[i].UserInstructions = sanitizePromptMultilineText(findings.Items[i].UserInstructions)
+		findings.Items[i].DriverInstructions = sanitizePromptMultilineText(findings.Items[i].DriverInstructions)
 		findings.Items[i].ReviewScope = sanitizePromptText(findings.Items[i].ReviewScope)
 		findings.Items[i].Category = sanitizePromptText(findings.Items[i].Category)
 		findings.Items[i].Check = sanitizePromptText(findings.Items[i].Check)

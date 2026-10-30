@@ -81,6 +81,9 @@ func TestCIStep_PendingChecksUseAdaptivePollIntervals(t *testing.T) {
 
 func TestCIStep_UsesStepEnvForCLIStartupChecks(t *testing.T) {
 	dir, baseSHA, headSHA := stepstest.SetupGitRepo(t)
+	// Capture the real toolchain PATH before hiding gh from the ambient
+	// environment. Step subprocesses need real git alongside the fake gh.
+	env := stepstest.FakeCIGH(t, "MERGED", "[]")
 
 	realGit, err := testgit.RealGit()
 	if err != nil {
@@ -92,7 +95,6 @@ func TestCIStep_UsesStepEnvForCLIStartupChecks(t *testing.T) {
 	t.Setenv("FAKE_CLI_REAL_GIT", realGit)
 	t.Setenv("PATH", hiddenPath)
 
-	env := stepstest.FakeCIGH(t, "MERGED", "[]")
 	prURL := "https://github.com/test/repo/pull/42"
 	ag := &stepstest.MockAgent{AgentName: "test"}
 	sctx := stepstest.NewTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
@@ -201,7 +203,7 @@ func TestCIStep_Execute_FixMode_RemoteAlreadyUpdatedDoesNotReturnManualIntervent
 
 	os.WriteFile(filepath.Join(dir, "resolved.txt"), []byte("resolved"), 0o644)
 	stepstest.GitCmd(t, dir, "add", "-A")
-	stepstest.GitCmd(t, dir, "commit", "-m", "resolve conflict")
+	stepstest.GitCmd(t, dir, "commit", "-m", "no-mistakes(ci): repair failing checks")
 	advancedHeadSHA := stepstest.GitCmd(t, dir, "rev-parse", "HEAD")
 	stepstest.GitCmd(t, dir, "push", "--force-with-lease", "origin", "HEAD:refs/heads/feature")
 
@@ -1806,13 +1808,13 @@ func TestCIStep_MovedPublishedHeadClearsCIReadiness(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "out-of-band.txt"), []byte("out of band"), 0o644)
 	stepstest.GitCmd(t, dir, "add", "-A")
 	stepstest.GitCmd(t, dir, "commit", "-m", "out of band commit")
-	stepstest.GitCmd(t, dir, "push", "origin", "feature")
+	movedSHA := stepstest.GitCmd(t, dir, "rev-parse", "HEAD")
+	stepstest.GitCmd(t, dir, "reset", "--hard", headSHA)
 
-	// The first poll is green, so the run records CI readiness before the
-	// cancelled check on the second poll reaches the head check.
+	// Green checks for the delivered head establish readiness; green checks
+	// for an out-of-band replacement must revoke it even without a rerun.
 	env, _ := stepstest.FakeCIGHLoggedSequence(t, "OPEN", []string{
 		`[{"name":"test","state":"SUCCESS","bucket":"pass"}]`,
-		`[{"name":"test","state":"CANCELLED","bucket":"cancel","link":"https://github.com/test/repo/actions/runs/900/job/901"}]`,
 	}, "", "")
 
 	prURL := "https://github.com/test/repo/pull/42"
@@ -1823,7 +1825,6 @@ func TestCIStep_MovedPublishedHeadClearsCIReadiness(t *testing.T) {
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Config.CITimeout = 30 * time.Minute
 	sctx.Config.AutoFix = config.AutoFix{CI: 3}
-	sctx.Config.CI = config.CI{RerunTransient: 1}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1832,6 +1833,17 @@ func TestCIStep_MovedPublishedHeadClearsCIReadiness(t *testing.T) {
 	polls := 0
 	step := (&steps.CIStep{}).SetWaitForNextPoll(func(ctx context.Context, interval time.Duration) error {
 		polls++
+		if polls == 1 {
+			run, err := sctx.DB.GetRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.CIReadyAt == nil {
+				t.Fatal("green checks for the delivered head must establish readiness before the remote moves")
+			}
+			stepstest.GitCmd(t, dir, "push", "origin", movedSHA+":refs/heads/feature")
+			sctx.Env = append(sctx.Env, "FAKE_CLI_PR_HEAD_SHA="+movedSHA)
+		}
 		if polls >= 5 {
 			cancel()
 			return ctx.Err()
@@ -2236,14 +2248,9 @@ func TestCIStep_CancelledCheckAmongPassingChecksEscalatesInsteadOfPollingForever
 	}
 }
 
-// Readiness is read from the PR's live check rollup on every poll, so it always
-// describes the commit the forge currently has for that PR. No recorded head
-// SHA gates it: a run whose own record still names the pre-advance commit must
-// still recognize the green terminal state the forge published for the head the
-// pipeline last pushed.
 func TestCIStep_GreenChecksAtAdvancedHeadAreRecognizedWhileRunTracksOlderHead(t *testing.T) {
 	t.Parallel()
-	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+	dir, _, baseSHA, headSHA := setupCIRerunRepo(t)
 
 	// The branch advances past the commit the run still records, the way a
 	// pipeline fix commit does mid-run.
@@ -2256,19 +2263,21 @@ func TestCIStep_GreenChecksAtAdvancedHeadAreRecognizedWhileRunTracksOlderHead(t 
 		t.Fatal("expected the published head to advance past the recorded head")
 	}
 
-	env := stepstest.FakeCIGHSequence(t, "OPEN", []string{
-		`[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"test","state":"SUCCESS","bucket":"pass"}]`,
-	})
+	env := stepstest.FakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"test","state":"SUCCESS","bucket":"pass"}]`)
 
 	prURL := "https://github.com/test/repo/pull/42"
 	ag := &stepstest.MockAgent{AgentName: "test"}
 	sctx := stepstest.NewTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.Run.PRURL = &prURL
-	sctx.Repo.UpstreamURL = upstream
+	sctx.Repo.UpstreamURL = "https://github.com/test/repo"
 	sctx.Config.CITimeout = 30 * time.Minute
 	sctx.Config.AutoFix = config.AutoFix{CI: 3}
 	sctx.Config.CI = config.CI{RerunTransient: config.DefaultCIRerunTransient}
+	if err := sctx.DB.UpdateRunReviewApprovedHeadSHA(sctx.Run.ID, headSHA); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Env = append(sctx.Env, `FAKE_CLI_PR_LIST_JSON=[{"number":42,"url":"https://github.com/test/repo/pull/42","baseRefName":"main"}]`)
 
 	var logs []string
 	sctx.Log = func(s string) { logs = append(logs, s) }
@@ -2300,6 +2309,9 @@ func TestCIStep_GreenChecksAtAdvancedHeadAreRecognizedWhileRunTracksOlderHead(t 
 	if dbRun.CIReadyAt == nil {
 		t.Fatal("green checks on the PR's current head must record CI readiness")
 	}
+	if dbRun.HeadSHA != advanced || dbRun.LastPushedSHA == nil || *dbRun.LastPushedSHA != advanced {
+		t.Fatalf("readiness preceded settling the advanced publication: %+v", dbRun)
+	}
 }
 
 // A rerun re-runs whatever commit the branch now points at, so it is only
@@ -2316,14 +2328,18 @@ func TestCIStep_MovedPublishedHeadTerminatesInsteadOfRerunning(t *testing.T) {
 	stepstest.GitCmd(t, dir, "commit", "-m", "out of band commit")
 	movedSHA := stepstest.GitCmd(t, dir, "rev-parse", "HEAD")
 	stepstest.GitCmd(t, dir, "push", "origin", "feature")
+	// The run's worktree stays at its delivered head: this is remote movement,
+	// not an unpublished repair left behind by the fix agent.
+	stepstest.GitCmd(t, dir, "reset", "--hard", headSHA)
 
 	env, logFile := stepstest.FakeCIGHLoggedSequence(t, "OPEN", []string{
 		`[{"name":"test","state":"CANCELLED","bucket":"cancel","link":"https://github.com/test/repo/actions/runs/900/job/901"}]`,
 	}, "", "")
+	env = append(env, "FAKE_CLI_PR_HEAD_SHA="+movedSHA)
 
 	prURL := "https://github.com/test/repo/pull/42"
 	ag := &stepstest.MockAgent{AgentName: "test"}
-	sctx := stepstest.NewTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := stepstest.NewTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.Run.PRURL = &prURL
 	sctx.Repo.UpstreamURL = upstream

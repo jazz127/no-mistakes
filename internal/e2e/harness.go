@@ -639,6 +639,16 @@ func (h *Harness) unselectedFindingIDs(runID string, step types.StepName, select
 
 func (h *Harness) CancelRun(runID string) {
 	h.t.Helper()
+	if err := h.TryCancelRun(runID); err != nil {
+		h.t.Fatalf("cancel run %s: %v", runID, err)
+	}
+}
+
+// TryCancelRun asks the daemon to cancel runID and returns the daemon's
+// error instead of failing the test, for callers that can tell a benign
+// refusal (the run already finished) from a real one.
+func (h *Harness) TryCancelRun(runID string) error {
+	h.t.Helper()
 	p := paths.WithRoot(h.NMHome)
 	client, err := ipc.Dial(p.Socket())
 	if err != nil {
@@ -647,11 +657,12 @@ func (h *Harness) CancelRun(runID string) {
 	defer client.Close()
 	var result ipc.CancelRunResult
 	if err := client.Call(ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: runID}, &result); err != nil {
-		h.t.Fatalf("cancel run %s: %v", runID, err)
+		return err
 	}
 	if !result.OK {
 		h.t.Fatalf("cancel run %s returned not OK", runID)
 	}
+	return nil
 }
 
 func (h *Harness) waitForRunStatus(branch string, timeout time.Duration, match func(types.RunStatus) bool, action string) *ipc.RunInfo {
