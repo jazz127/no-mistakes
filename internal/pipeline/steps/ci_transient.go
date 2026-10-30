@@ -556,7 +556,7 @@ func (s *CIStep) rerunTransientChecks(sctx *pipeline.StepContext, host scm.Host,
 	}
 	if published != sctx.Run.HeadSHA {
 		sctx.Log(fmt.Sprintf("published branch head moved (expected %s, observed %s); not re-running checks", shortSHA(sctx.Run.HeadSHA), shortSHA(published)))
-		return false, ciRerunHeadMismatchOutcome(sctx.Run.HeadSHA, published)
+		return false, ciPublishedHeadMismatchOutcome(sctx.Run.HeadSHA, published)
 	}
 
 	issued := false
@@ -772,12 +772,12 @@ func unresolvedTransientDescription(name string, reruns int, preRunFailure bool)
 	return fmt.Sprintf("CI check cancelled without a verdict: %s - the provider cancelled it rather than reporting a job failure, and no rerun is outstanding to replace that result, so it needs a decision rather than a code fix", name)
 }
 
-func ciRerunHeadMismatchOutcome(expected, observed string) *pipeline.StepOutcome {
+func ciPublishedHeadMismatchOutcome(expected, observed string) *pipeline.StepOutcome {
 	findings := Findings{
 		Summary: "published branch head no longer matches the commit this run delivered",
 		Items: []Finding{{
 			Severity:    "warning",
-			Description: fmt.Sprintf("CI checks could not be re-run: expected head %s, observed %s on the push target", expected, observed),
+			Description: fmt.Sprintf("CI checks cannot certify this run: expected head %s, observed %s on the push target", expected, observed),
 			Action:      types.ActionAskUser,
 		}},
 	}

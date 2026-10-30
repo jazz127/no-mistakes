@@ -708,6 +708,15 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 		if err != nil {
 			if errors.Is(err, scm.ErrHeadChanged) {
+				// A lagging provider may still describe an older pipeline, but
+				// a moved push-target branch cannot converge to this run's head.
+				if published, readErr := publishedBranchHead(sctx); readErr == nil && published != sctx.Run.HeadSHA {
+					sctx.Log(fmt.Sprintf("published branch head moved (expected %s, observed %s); stopping CI monitoring", shortSHA(sctx.Run.HeadSHA), shortSHA(published)))
+					if err := clearCIMonitorReady(sctx); err != nil {
+						return nil, err
+					}
+					return ciPublishedHeadMismatchOutcome(sctx.Run.HeadSHA, published), nil
+				}
 				// The provider answered, but nothing it offered is evidence for
 				// the commit this run is delivering: no pipeline has registered
 				// for that commit yet, and the pipeline the merge request still
