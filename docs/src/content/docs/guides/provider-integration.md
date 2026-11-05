@@ -114,15 +114,14 @@ git switch feature-branch
 no-mistakes axi run --intent 'Describe the change being validated'
 ```
 
-The PR lookup searches the base repository for the branch and matches the fork owner, so an existing PR is updated instead of creating another one.
-The pipeline pushes the validated head to the fork and renews the existing PR's body attestation through the normal [pre-push attestation protocol](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation).
-The PR step then refreshes the description from this run's results.
+See the [PR step reference](/no-mistakes/reference/pipeline-steps/#pr) for existing fork PR matching and text-preservation rules.
+The [pre-push attestation protocol](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) explains when its body attestation is renewed and what happens if renewal fails.
 Keep required steps enabled: a stale attestation is resolved by validating the new head, not by copying the previous run's claim.
 
 Initializing with `origin` still pointed at your fork targets the fork itself for PR discovery, even if `--fork-url` also names that fork; an upstream PR URL is not inferred from the branch name or a remote named `upstream`.
 If no matching open PR exists in the configured base repository, the normal behavior is to create one there.
 Check that repository, fork owner, and branch against the existing PR before starting the run.
-Changing only `--base-branch` changes the target branch, not the repository used for PR discovery.
+`--base-branch` selects a branch within the configured repository; it cannot select the upstream repository. See [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) for existing-PR retargeting rules.
 
 #### Workflow-file changes require the `workflow` scope
 
