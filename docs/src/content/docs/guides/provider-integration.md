@@ -103,6 +103,26 @@ Re-running `no-mistakes init` later preserves the stored fork URL unless you pas
 Fork routing currently requires both `origin` and `--fork-url` to be GitHub remotes with owner/repo paths.
 GitLab, Forgejo, Bitbucket, Azure DevOps, Gitea, Cursor Origin, and provider plugins do not implement fork MR/PR routing yet; if a legacy or manually edited repo record has `fork_url` set for those providers, PR creation skips instead of opening an unsafe self PR.
 
+#### Updating an existing upstream PR
+
+The same fork configuration also updates an already-open PR; no separate adoption flag or hand-written attestation is needed.
+From the PR URL, identify its base repository, head repository, and head branch, then configure `origin` as the base repository and `--fork-url` as the head repository using the commands above.
+Run the pipeline from that exact head branch with your committed changes:
+
+```sh
+git switch feature-branch
+no-mistakes axi run --intent 'Describe the change being validated'
+```
+
+See the [PR step reference](/no-mistakes/reference/pipeline-steps/#pr) for existing fork PR matching and text-preservation rules.
+The [pre-push attestation protocol](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) explains when its body attestation is renewed and what happens if renewal fails.
+Keep required steps enabled: a stale attestation is resolved by validating the new head, not by copying the previous run's claim.
+
+Initializing with `origin` still pointed at your fork targets the fork itself for PR discovery, even if `--fork-url` also names that fork; an upstream PR URL is not inferred from the branch name or a remote named `upstream`.
+If no matching open PR exists in the configured base repository, the normal behavior is to create one there.
+Check that repository, fork owner, and branch against the existing PR before starting the run.
+`--base-branch` selects a branch within the configured repository; it cannot select the upstream repository. See [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) for existing-PR retargeting rules.
+
 #### Workflow-file changes require the `workflow` scope
 
 If your branch touches a `.github/workflows/*.yml` or `*.yaml` file, the push to your fork requires a GitHub credential with the `workflow` scope; GitHub rejects it with `refusing to allow an OAuth App to create or update workflow ... without workflow scope` when the stored token lacks it.
